@@ -156,7 +156,8 @@ static BspCanStatus can_send_with_format(FDCAN_HandleTypeDef* hcan,
     if(hcan == NULL || data == NULL) {
         return STM32_HAL_CAN_INVALID_PARAM;
     }
-    if(can_len_to_dlc(len) == 0xFFFFFFFFu) {
+    if(can_len_to_dlc(len) == 0xFFFFFFFFu ||
+       (fd_format == FDCAN_CLASSIC_CAN && len > 8u)) {
         return STM32_HAL_CAN_INVALID_DLC;
     }
 
@@ -185,12 +186,12 @@ static BspCanStatus can_send_with_format(FDCAN_HandleTypeDef* hcan,
     tx_header.MessageMarker = 0u;
 
     if(HAL_FDCAN_GetTxFifoFreeLevel(hcan) == 0u) {
-        uint32_t pending = hcan->Instance->TXBRP;
-
-        if(pending != 0u) {
-            (void)HAL_FDCAN_AbortTxRequest(hcan, pending);
-        }
-
+        /*
+         * Shared motor bus: never abort TXBRP here. TXBRP contains every
+         * pending frame on this FDCAN instance, so aborting it would let one
+         * producer cancel DM/HT frames queued by another producer.
+         * Let the caller retry on its next scheduling period instead.
+         */
         return STM32_HAL_CAN_TX_MAILBOX_TIMEOUT;
     }
 

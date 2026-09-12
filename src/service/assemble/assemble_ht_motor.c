@@ -8,12 +8,10 @@
 #include <math.h>
 #include <stddef.h>
 
-#define HT_TEST_MOTOR_MODEL         "HTDW-4438-30"
-#define HT_TEST_MOTOR_ID            2u
-#define HT_SECOND_MOTOR_ID          8u
-#define HT_FEEDBACK_PERIOD_MS       20u
-#define HT_ID2_OLD_FEEDBACK_PERIOD_MS 100u
-#define HT_ID2_OLD_TARGET_TX_PERIOD_MS 20u
+#define HT_PITCH_MOTOR_ID          2u
+#define HT_ROLL_MOTOR_ID           8u
+#define HT_FEEDBACK_PERIOD_MS      20u
+#define HT_TARGET_TX_PERIOD_MS     10u
 #define HT_TWO_PI                   6.28318530717958647692f
 #define HT_TEST_MOTOR_COUNT         2u
 
@@ -33,7 +31,15 @@ static volatile float s_raw_position[HT_TEST_MOTOR_COUNT];
 static uint32_t s_last_feedback_request_ms[HT_TEST_MOTOR_COUNT];
 static uint32_t s_last_target_tx_ms[HT_TEST_MOTOR_COUNT];
 static bool s_position_command_sent[HT_TEST_MOTOR_COUNT];
-static const uint16_t s_ht_motor_ids[HT_TEST_MOTOR_COUNT] = { HT_TEST_MOTOR_ID, HT_SECOND_MOTOR_ID };
+static const uint16_t s_ht_motor_ids[HT_TEST_MOTOR_COUNT] = { HT_PITCH_MOTOR_ID, HT_ROLL_MOTOR_ID };
+static const HtMotorDeviceProfile s_ht_motor_profiles[HT_TEST_MOTOR_COUNT] = {
+    { HT_PITCH_MOTOR_ID, HT_MOTOR_MODEL_4438_30 },
+    { HT_ROLL_MOTOR_ID, HT_MOTOR_MODEL_5047_36 },
+};
+static const HtMotorDriverConfig s_ht_driver_config = {
+    .profiles = s_ht_motor_profiles,
+    .count = HT_TEST_MOTOR_COUNT,
+};
 
 static uint8_t ht_motor_index_by_id(uint16_t id) {
     uint8_t i;
@@ -57,7 +63,7 @@ SystemStatus assemble_ht_motor(void) {
         .ops = &ht_motor_ops,
         .timeout_ms = 20u,
         .retry_count = 0u,
-        .driver_config = NULL,
+        .driver_config = &s_ht_driver_config,
     };
     BusMotorStatus status;
     uint8_t i;
@@ -86,7 +92,7 @@ SystemStatus assemble_ht_motor(void) {
         return SYSTEM_STATUS_ERROR;
     }
     log_info("HT CAN started");
-    log_info("HT CAN cfg: IDs 2 and 8 on FDCAN1, ID2 uses old FD-style tx");
+    log_info("HT CAN cfg: Classic CAN IDs 2(4438-30),8(5047-36) on FDCAN1");
 
     log_info("HT driver init");
     status = ht_motor_instance.init(&config);
@@ -108,10 +114,9 @@ SystemStatus assemble_ht_motor(void) {
     }
     log_info("HT waiting for encoder feedback");
 
-    log_info("HT ready: %s ids=%u,%u on FDCAN1",
-             HT_TEST_MOTOR_MODEL,
-             HT_TEST_MOTOR_ID,
-             HT_SECOND_MOTOR_ID);
+    log_info("HT ready: Classic CAN pitch=4438-30(id=%u) roll=5047-36(id=%u) on FDCAN1",
+             HT_PITCH_MOTOR_ID,
+             HT_ROLL_MOTOR_ID);
     return SYSTEM_STATUS_OK;
 }
 
@@ -121,11 +126,7 @@ void assemble_ht_motor_process(void) {
     uint8_t i;
 
     for(i = 0u; i < HT_TEST_MOTOR_COUNT; ++i) {
-        uint32_t period_ms = s_ht_motor_ids[i] == HT_TEST_MOTOR_ID
-            ? HT_ID2_OLD_FEEDBACK_PERIOD_MS
-            : HT_FEEDBACK_PERIOD_MS;
-
-        if((uint32_t)(now - s_last_feedback_request_ms[i]) >= period_ms) {
+        if((uint32_t)(now - s_last_feedback_request_ms[i]) >= HT_FEEDBACK_PERIOD_MS) {
             s_last_feedback_request_ms[i] = now;
             status = ht_motor_request_feedback(s_ht_motor_ids[i]);
             if(status != MOTOR_STATUS_OK) {
@@ -203,16 +204,14 @@ bool assemble_ht_motor_set_target_position(uint16_t id, float position) {
         return false;
     }
 
-    if(id == HT_TEST_MOTOR_ID) {
-        if(!assemble_ht_motor_get_raw_position(id, &current_position)) {
-            return false;
-        }
-        target_position = ht_motor_nearest_absolute_target(current_position, position);
+    if(!assemble_ht_motor_get_raw_position(id, &current_position)) {
+        return false;
+    }
+    target_position = ht_motor_nearest_absolute_target(current_position, position);
 
-        if(s_position_command_sent[idx]
-            && (uint32_t)(now - s_last_target_tx_ms[idx]) < HT_ID2_OLD_TARGET_TX_PERIOD_MS) {
-            return true;
-        }
+    if(s_position_command_sent[idx]
+        && (uint32_t)(now - s_last_target_tx_ms[idx]) < HT_TARGET_TX_PERIOD_MS) {
+        return true;
     }
 
     if(!s_position_command_sent[idx]) {
@@ -223,11 +222,10 @@ bool assemble_ht_motor_set_target_position(uint16_t id, float position) {
         }
         s_position_command_sent[idx] = true;
 
-        if(id == HT_TEST_MOTOR_ID) {
-            log_info("HT old ID2 angle target start encoder=%ld absolute=%ld",
-                     (long)(ht_motor_wrap_one_turn(position) * 1000.0f),
-                     (long)(target_position * 1000.0f));
-        }
+        log_info("HT Classic target start id=%u encoder=%ld absolute=%ld",
+                 id,
+                 (long)(ht_motor_wrap_one_turn(position) * 1000.0f),
+                 (long)(target_position * 1000.0f));
     }
 
     status = ht_motor_instance.set_pos(id, target_position);
@@ -293,7 +291,7 @@ bool assemble_ht_motor_set_target_speed(uint16_t id, float speed) {
 }
 
 static bool ht_motor_can_send(uint32_t id, const uint8_t* data, uint8_t len) {
-    return can_send(&hfdcan1, id, data, len) == STM32_HAL_CAN_OK;
+    return can_send_classic(&hfdcan1, id, data, len) == STM32_HAL_CAN_OK;
 }
 
 static void ht_motor_can_rx_callback(FDCAN_HandleTypeDef* hcan,
@@ -325,13 +323,20 @@ static void ht_motor_can_rx_callback(FDCAN_HandleTypeDef* hcan,
 }
 
 static uint8_t ht_motor_rx_length(uint32_t data_length) {
-    static const uint8_t lengths[16] = {
-        0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u,
-        8u, 12u, 16u, 20u, 24u, 32u, 48u, 64u
-    };
-    uint32_t dlc = data_length;
-
-    return dlc < 16u ? lengths[dlc] : 0u;
+    switch(data_length) {
+        case FDCAN_DLC_BYTES_0: return 0u;
+        case FDCAN_DLC_BYTES_1: return 1u;
+        case FDCAN_DLC_BYTES_2: return 2u;
+        case FDCAN_DLC_BYTES_3: return 3u;
+        case FDCAN_DLC_BYTES_4: return 4u;
+        case FDCAN_DLC_BYTES_5: return 5u;
+        case FDCAN_DLC_BYTES_6: return 6u;
+        case FDCAN_DLC_BYTES_7: return 7u;
+        case FDCAN_DLC_BYTES_8: return 8u;
+        default:
+            /* Some HAL versions expose the raw DLC nibble instead of encoded macros. */
+            return data_length <= 8u ? (uint8_t)data_length : 0u;
+    }
 }
 
 static float ht_motor_wrap_one_turn(float position) {

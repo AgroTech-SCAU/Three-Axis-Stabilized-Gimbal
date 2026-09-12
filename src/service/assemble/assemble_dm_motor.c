@@ -332,22 +332,18 @@ bool assemble_dm_motor_get_position(float* position) {
 }
 
 bool assemble_dm_motor_set_target_position(float position, float speed) {
-    BusMotorStatus status;
-
     if(!assemble_dm_motor_is_ready() || !isfinite(position) || !isfinite(speed) || speed < 0.0f) {
         return false;
     }
 
-    status = dm_motor_set_pos_vel((BusMotorId)DM_GIMBAL_LOGICAL_ID, position, speed);
-    if(status != MOTOR_STATUS_OK) {
-        log_warn("DM target failed: pos=%.3f speed=%.3f status=%s",
-                 (double)position, (double)speed, bus_motor.status_str(status));
-        return false;
-    }
-
+    /*
+     * Only update the desired target here. assemble_dm_motor_process() is the
+     * single 100 Hz CAN producer for runtime POS_VEL commands. This prevents
+     * the gimbal controller and the resend path from generating two DM frames
+     * in the same 10 ms window.
+     */
     s_target_position = position;
     s_target_speed = speed;
-    s_last_target_tx_ms = HAL_GetTick();
     return true;
 }
 

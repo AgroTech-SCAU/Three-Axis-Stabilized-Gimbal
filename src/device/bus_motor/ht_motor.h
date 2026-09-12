@@ -3,50 +3,59 @@
 
 #include "bus_motor.h"
 
-// ! ========================= 接 口 变 量 / Typedef 声 明 ========================= ! //
-
 /**
  * @file ht_motor.h
- * @brief 高擎 FDCAN 总线电机驱动接口
+ * @brief 高擎 Classic CAN v2.x 总线电机驱动接口
+ *
+ * 统一对外单位：位置 rad，速度 rad/s，力矩 N*m。
+ * 总线侧严格使用 Classical CAN，单帧数据长度不超过 8 字节。
  */
 
-/**
- * @brief 高擎电机支持的协议 ID 范围
- */
 #define HT_MOTOR_MAX_ID 30u
+#define HT_MOTOR_MAX_FRAME_LEN 8u
 
-/**
- * @brief 高擎 FDCAN 最大数据长度
- */
-#define HT_MOTOR_MAX_FRAME_LEN 64u
-
-/**
- * @brief 高擎电机运行模式
- */
+/** 高擎电机运行状态/模式编号（与寄存器模式编号保持兼容）。 */
 typedef enum {
-    HT_MOTOR_MODE_STOP = 0u,          /**< 停止并清除错误 */
-    HT_MOTOR_MODE_ERROR = 1u,         /**< 错误状态 */
-    HT_MOTOR_MODE_READY_2 = 2u,       /**< 准备运行 */
-    HT_MOTOR_MODE_READY_3 = 3u,       /**< 准备运行 */
-    HT_MOTOR_MODE_READY_4 = 4u,       /**< 准备运行 */
-    HT_MOTOR_MODE_PWM = 5u,           /**< PWM 模式 */
-    HT_MOTOR_MODE_VOLTAGE = 6u,       /**< 电压模式 */
-    HT_MOTOR_MODE_FOC_VOLTAGE = 7u,   /**< FOC 电压模式 */
-    HT_MOTOR_MODE_DQ_VOLTAGE = 8u,    /**< DQ 电压模式 */
-    HT_MOTOR_MODE_DQ_CURRENT = 9u,    /**< DQ 电流模式 */
-    HT_MOTOR_MODE_POSITION = 10u,     /**< 位置/运控模式 */
-    HT_MOTOR_MODE_TIMEOUT = 11u,      /**< 超时模式 */
-    HT_MOTOR_MODE_ZERO_SPEED = 12u,   /**< 零速模式 */
-    HT_MOTOR_MODE_RANGE = 13u,        /**< 范围模式 */
-    HT_MOTOR_MODE_MEASURE_L = 14u,    /**< 电感测量模式 */
-    HT_MOTOR_MODE_BRAKE = 15u,        /**< 刹车模式 */
+    HT_MOTOR_MODE_STOP = 0u,
+    HT_MOTOR_MODE_ERROR = 1u,
+    HT_MOTOR_MODE_READY_2 = 2u,
+    HT_MOTOR_MODE_READY_3 = 3u,
+    HT_MOTOR_MODE_READY_4 = 4u,
+    HT_MOTOR_MODE_PWM = 5u,
+    HT_MOTOR_MODE_VOLTAGE = 6u,
+    HT_MOTOR_MODE_FOC_VOLTAGE = 7u,
+    HT_MOTOR_MODE_DQ_VOLTAGE = 8u,
+    HT_MOTOR_MODE_DQ_CURRENT = 9u,
+    HT_MOTOR_MODE_POSITION = 10u,
+    HT_MOTOR_MODE_TIMEOUT = 11u,
+    HT_MOTOR_MODE_ZERO_SPEED = 12u,
+    HT_MOTOR_MODE_RANGE = 13u,
+    HT_MOTOR_MODE_MEASURE_L = 14u,
+    HT_MOTOR_MODE_BRAKE = 15u,
 } HtMotorMode;
 
+/** 当前云台实际使用的高擎型号。 */
+typedef enum {
+    HT_MOTOR_MODEL_UNKNOWN = 0u,
+    HT_MOTOR_MODEL_4438_30,
+    HT_MOTOR_MODEL_5047_36,
+} HtMotorModel;
+
+/** 单台电机型号配置，用于 Classic CAN int16 力矩修正。 */
+typedef struct {
+    uint16_t id;
+    HtMotorModel model;
+} HtMotorDeviceProfile;
+
+/** 通过 BusMotorConfig.driver_config 传入。 */
+typedef struct {
+    const HtMotorDeviceProfile* profiles;
+    uint8_t count;
+} HtMotorDriverConfig;
+
 /**
- * @brief 一拖多模式中的原始 int16 控制量
- *
- * 高擎一拖多协议固定使用 int16。由于不同固件/电机型号的量程映射可能不同，
- * 此结构直接保存协议原始值，避免驱动层错误假定缩放系数。
+ * 兼容旧 FDCAN 接口保留的原始组控结构。
+ * Classic CAN v2 当前云台路径不使用组控；相应 API 返回 UNSUPPORTED。
  */
 typedef struct {
     int16_t position;
@@ -54,9 +63,6 @@ typedef struct {
     int16_t torque;
 } HtMotorGroupPvtRaw;
 
-/**
- * @brief 一拖多位置、速度、力矩、Kp、Kd 原始控制量
- */
 typedef struct {
     int16_t position;
     int16_t speed;
@@ -65,39 +71,28 @@ typedef struct {
     int16_t kd;
 } HtMotorGroupMitRaw;
 
-/**
- * @brief 高擎电机统一接口实例
- */
 extern const LegacyBusMotorInterface ht_motor_instance;
 
-// ! ========================= 接 口 函 数 声 明 ========================= ! //
-
 /**
- * @brief 解析高擎电机 FDCAN 回复帧并刷新本地缓存
- * @param frame_id FDCAN 扩展 ID
- * @param data 回复数据
- * @param len 回复数据长度
- * @param feedback 可选输出反馈，允许为 NULL
- * @return 电机状态码
+ * @brief 解析 Classic CAN 状态回复。
+ *
+ * 当前运行链查询 0x01~0x03 三个 int16 寄存器，对应位置、速度、力矩。
+ * @param frame_id 回复 CAN ID（ID 1~7 通常为标准帧，ID >=8 为扩展帧）
+ * @param data 数据段
+ * @param len 数据长度，Classic CAN 最大 8
+ * @param feedback 可选输出
  */
 BusMotorStatus ht_motor_parse_feedback_frame(uint32_t frame_id,
     const uint8_t* data,
     uint8_t len,
     BusMotorFeedback* feedback);
 
+/** @brief 主动查询位置、速度、力矩。 */
 BusMotorStatus ht_motor_request_feedback(uint16_t id);
 
 /**
- * @brief 发送完整运控指令：位置、速度、前馈力矩、Kp、Kd
- *
- * 位置和速度输入单位与统一接口一致，分别为 rad、rad/s。
- * @param id 电机 ID
- * @param position 目标位置，rad
- * @param speed 目标速度，rad/s
- * @param torque 前馈力矩，N*m
- * @param kp 位置比例系数
- * @param kd 速度比例系数
- * @return 电机状态码
+ * @brief 兼容旧接口。Classic CAN v2 的 MIT 控制需要独立协议封装，
+ * 当前三轴云台未使用该 API，因此返回 MOTOR_STATUS_UNSUPPORTED。
  */
 BusMotorStatus ht_motor_set_motion(uint16_t id,
     float position,
@@ -106,27 +101,13 @@ BusMotorStatus ht_motor_set_motion(uint16_t id,
     float kp,
     float kd);
 
-/**
- * @brief 发送一拖多位置、速度、力矩原始指令
- * @param first_id 本组首个电机 ID，仅支持 1、11、21
- * @param commands 控制量数组
- * @param count 本次写入数量，不得超过对应分组容量
- * @param query_id 需要查询状态的电机 ID；0 表示不查询
- * @return 电机状态码
- */
+/** Classic CAN 当前不使用旧 FDCAN 一拖多帧格式。 */
 BusMotorStatus ht_motor_group_set_pvt_raw(uint16_t first_id,
     const HtMotorGroupPvtRaw* commands,
     uint8_t count,
     uint8_t query_id);
 
-/**
- * @brief 发送一拖多位置、速度、力矩、Kp、Kd原始指令
- * @param first_id 本组首个电机 ID，仅支持 1、7、13、19、25
- * @param commands 控制量数组
- * @param count 本次写入数量，不得超过对应分组容量
- * @param query_id 需要查询状态的电机 ID；0 表示不查询
- * @return 电机状态码
- */
+/** Classic CAN 当前不使用旧 FDCAN 一拖多帧格式。 */
 BusMotorStatus ht_motor_group_set_motion_raw(uint16_t first_id,
     const HtMotorGroupMitRaw* commands,
     uint8_t count,
