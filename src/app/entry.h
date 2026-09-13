@@ -42,7 +42,7 @@ static bool init_ok = false;
 #define ENTRY_GIMBAL_YAW_ENABLE 1u
 #define ENTRY_GIMBAL_ROLL_SIGN (-1.0f)
 #define ENTRY_GIMBAL_PITCH_SIGN (-1.0f)
-#define ENTRY_GIMBAL_YAW_SIGN (1.0f)
+#define ENTRY_GIMBAL_YAW_SIGN (-1.0f)
 #define ENTRY_GIMBAL_ROLL_GAIN 1.5f
 #define ENTRY_GIMBAL_PITCH_GAIN 1.15f
 #define ENTRY_GIMBAL_MAX_OFFSET_RAD 1.8f
@@ -362,8 +362,7 @@ static inline void entry_process_ht_id2_speed_test(void) {
         }
 
         if(delay_nb_ms(&s_entry_ht_id2_speed_tx_timer, ENTRY_HT_ID2_SPEED_TEST_TX_PERIOD_MS)) {
-            s_entry_ht_id2_speed_target_position = position
-                + ENTRY_HT_ID2_SPEED_TEST_RAD_S * ENTRY_HT_ID2_SPEED_TEST_LOOKAHEAD_S;
+            s_entry_ht_id2_speed_target_position = position + ENTRY_HT_ID2_SPEED_TEST_RAD_S * ENTRY_HT_ID2_SPEED_TEST_LOOKAHEAD_S;
 
             (void)assemble_ht_motor_set_target_position_speed(
                 ENTRY_HT_ID2_SPEED_TEST_ID,
@@ -397,8 +396,7 @@ static inline void entry_process_gimbal_hold_position(void) {
         return;
     }
 
-    if(!assemble_ht_motor_get_raw_position(ENTRY_GIMBAL_ROLL_MOTOR_ID, &roll_position)
-        || !assemble_ht_motor_get_raw_position(ENTRY_GIMBAL_PITCH_MOTOR_ID, &pitch_position)) {
+    if(!assemble_ht_motor_get_raw_position(ENTRY_GIMBAL_ROLL_MOTOR_ID, &roll_position) || !assemble_ht_motor_get_raw_position(ENTRY_GIMBAL_PITCH_MOTOR_ID, &pitch_position)) {
         return;
     }
 
@@ -567,8 +565,7 @@ static inline void entry_process_gimbal_level(void) {
         }
 
 #if ENTRY_GIMBAL_ROLL_ENABLE && ENTRY_GIMBAL_PITCH_ENABLE
-        if(entry_absf(roll_position - s_entry_gimbal_initial_roll_target) <= ENTRY_GIMBAL_INITIAL_TOLERANCE_RAD
-            && entry_absf(pitch_position - s_entry_gimbal_initial_pitch_target) <= ENTRY_GIMBAL_INITIAL_TOLERANCE_RAD) {
+        if(entry_absf(roll_position - s_entry_gimbal_initial_roll_target) <= ENTRY_GIMBAL_INITIAL_TOLERANCE_RAD && entry_absf(pitch_position - s_entry_gimbal_initial_pitch_target) <= ENTRY_GIMBAL_INITIAL_TOLERANCE_RAD) {
 #elif ENTRY_GIMBAL_ROLL_ENABLE
         if(entry_absf(roll_position - s_entry_gimbal_initial_roll_target) <= ENTRY_GIMBAL_INITIAL_TOLERANCE_RAD) {
 #elif ENTRY_GIMBAL_PITCH_ENABLE
@@ -652,13 +649,11 @@ static inline void entry_process_gimbal_level(void) {
     if(delay_nb_ms(&s_entry_gimbal_control_timer, ENTRY_GIMBAL_CONTROL_PERIOD_MS)) {
 #if ENTRY_GIMBAL_ROLL_ENABLE
         roll_error = entry_apply_deadbandf(angle.roll - s_entry_gimbal_zero_roll_angle, ENTRY_GIMBAL_LEVEL_DEADBAND_RAD);
-        s_entry_gimbal_roll_error_filter += ENTRY_GIMBAL_ERROR_FILTER_ALPHA
-            * (roll_error - s_entry_gimbal_roll_error_filter);
+        s_entry_gimbal_roll_error_filter += ENTRY_GIMBAL_ERROR_FILTER_ALPHA * (roll_error - s_entry_gimbal_roll_error_filter);
 
         roll_min = s_entry_gimbal_zero_roll_motor - ENTRY_GIMBAL_MAX_OFFSET_RAD;
         roll_max = s_entry_gimbal_zero_roll_motor + ENTRY_GIMBAL_MAX_OFFSET_RAD;
-        roll_target = s_entry_gimbal_zero_roll_motor
-            + (ENTRY_GIMBAL_ROLL_SIGN * ENTRY_GIMBAL_ROLL_GAIN * s_entry_gimbal_roll_error_filter);
+        roll_target = s_entry_gimbal_zero_roll_motor + (ENTRY_GIMBAL_ROLL_SIGN * ENTRY_GIMBAL_ROLL_GAIN * s_entry_gimbal_roll_error_filter);
         roll_target = entry_clampf(roll_target, roll_min, roll_max);
         s_entry_gimbal_roll_target = entry_step_towardsf(
             s_entry_gimbal_roll_target, roll_target, roll_step);
@@ -666,13 +661,11 @@ static inline void entry_process_gimbal_level(void) {
 #endif
 #if ENTRY_GIMBAL_PITCH_ENABLE
         pitch_error = entry_apply_deadbandf(angle.pitch - s_entry_gimbal_zero_pitch_angle, ENTRY_GIMBAL_LEVEL_DEADBAND_RAD);
-        s_entry_gimbal_pitch_error_filter += ENTRY_GIMBAL_ERROR_FILTER_ALPHA
-            * (pitch_error - s_entry_gimbal_pitch_error_filter);
+        s_entry_gimbal_pitch_error_filter += ENTRY_GIMBAL_ERROR_FILTER_ALPHA * (pitch_error - s_entry_gimbal_pitch_error_filter);
 
         pitch_min = s_entry_gimbal_zero_pitch_motor - ENTRY_GIMBAL_MAX_OFFSET_RAD;
         pitch_max = s_entry_gimbal_zero_pitch_motor + ENTRY_GIMBAL_MAX_OFFSET_RAD;
-        pitch_target = s_entry_gimbal_zero_pitch_motor
-            + (ENTRY_GIMBAL_PITCH_SIGN * ENTRY_GIMBAL_PITCH_GAIN * s_entry_gimbal_pitch_error_filter);
+        pitch_target = s_entry_gimbal_zero_pitch_motor + (ENTRY_GIMBAL_PITCH_SIGN * ENTRY_GIMBAL_PITCH_GAIN * s_entry_gimbal_pitch_error_filter);
         pitch_target = entry_clampf(pitch_target, pitch_min, pitch_max);
         s_entry_gimbal_pitch_target = entry_step_towardsf(
             s_entry_gimbal_pitch_target, pitch_target, pitch_step);
@@ -793,8 +786,7 @@ static inline void entry_update_gimbal_fast_angle_guard(float roll_angle, float 
         float roll_delta = entry_absf(entry_wrap_pi(roll_angle - s_entry_gimbal_last_roll_angle));
         float pitch_delta = entry_absf(entry_wrap_pi(pitch_angle - s_entry_gimbal_last_pitch_angle));
 
-        if((roll_delta > ENTRY_GIMBAL_FAST_ANGLE_DELTA_RAD)
-            || (pitch_delta > ENTRY_GIMBAL_FAST_ANGLE_DELTA_RAD)) {
+        if((roll_delta > ENTRY_GIMBAL_FAST_ANGLE_DELTA_RAD) || (pitch_delta > ENTRY_GIMBAL_FAST_ANGLE_DELTA_RAD)) {
             s_entry_gimbal_fast_angle_slow_until = now + ENTRY_GIMBAL_FAST_ANGLE_SLOW_MS;
         }
     }
