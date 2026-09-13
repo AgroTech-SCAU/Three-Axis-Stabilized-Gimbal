@@ -277,7 +277,7 @@ void assemble_dm_motor_process(void) {
 
         if((uint32_t)(now - s_last_feedback_log_ms) >= DM_FEEDBACK_LOG_PERIOD_MS) {
             s_last_feedback_log_ms = now;
-            log_info("DM fb pos=%.3f spd=%.3f tor=%.3f err=0x%02X ready=%u",
+            log_info("DM fb pos=%.3f spd=%.3f tor=%.3f state=0x%02X ready=%u",
                      (double)feedback.position,
                      (double)feedback.velocity,
                      (double)feedback.torque,

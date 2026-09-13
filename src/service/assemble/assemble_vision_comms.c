@@ -21,6 +21,7 @@
  * @details 相机输出 115200 8N1。使用 UART7（PE7=RX / PE8=TX）。
  */
 #define VISION_COMMS_UART (&huart7)
+#define VISION_COMMS_BAUD_RATE 115200u
 
 // ! ========================= 变 量 声 明 ========================= ! //
 
@@ -44,6 +45,13 @@ SystemStatus assemble_vision_comms(void) {
         .exit = assemble_protocol_parser_critical_exit,
     };
     VisionCommsConfig config;
+
+    if(VISION_COMMS_UART->Init.BaudRate != VISION_COMMS_BAUD_RATE) {
+        log_error("VISION_COMMS UART7 baud mismatch: actual=%lu expected=%lu",
+                  (unsigned long)VISION_COMMS_UART->Init.BaudRate,
+                  (unsigned long)VISION_COMMS_BAUD_RATE);
+        return SYSTEM_STATUS_ERROR;
+    }
 
     /* UART RX ISR 写 RingBuf、主循环读 RingBuf，共享 size/index，必须原子保护。
        注册为 protocol_parser 默认临界区后，后续创建的 vision/pc/pi RingBuf 都继承该保护。 */
