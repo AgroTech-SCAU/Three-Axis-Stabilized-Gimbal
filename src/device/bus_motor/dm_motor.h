@@ -184,6 +184,14 @@ BusMotorStatus dm_motor_parse_feedback_frame(uint32_t frame_id, const uint8_t da
 bool dm_motor_parse_parameter_frame(uint32_t frame_id, const uint8_t data[DM_MOTOR_CMD_LEN]);
 
 /**
+ * @brief 使指定电机的硬件模式确认失效
+ * @param motor_id 业务逻辑电机 ID
+ * @return 电机状态码
+ * @details CAN 总线恢复或电机可能重启后调用，强制下一次 profile.activate() 重新等待模式 ACK。
+ */
+BusMotorStatus dm_motor_invalidate_mode_confirmation(BusMotorId motor_id);
+
+/**
  * @brief 清除指定达妙电机错误
  * @param motor_id 业务逻辑电机 ID
  * @return 电机状态码

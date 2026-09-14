@@ -25,6 +25,8 @@
 #define DM_AUTO_MODE_DELAY_MS             100u
 #define DM_MODE_RETRY_DELAY_MS            500u
 #define DM_MODE_MAX_RETRY                 3u
+#define DM_MODE_RETRY_FOREVER_DELAY_MS    2000u
+#define DM_CAN_DIAG_LOG_PERIOD_MS          1000u
 #define DM_TARGET_TX_PERIOD_MS            10u
 #define DM_FEEDBACK_STALE_TIMEOUT_MS      500u
 #define DM_FEEDBACK_LOG_PERIOD_MS         1000u
@@ -49,6 +51,8 @@ static bool dm_send_current_target(void);
 static bool dm_enter_pos_vel_reference(void);
 static void dm_try_enter_ready(uint32_t now_ms, const BusMotorFeedback* feedback);
 static void dm_log_rx_diagnostic(void);
+static void dm_log_can_diagnostic(const char* action);
+static void dm_restart_runtime_handshake(uint32_t now_ms, uint32_t delay_ms);
 
 static const DmMotorConfig s_dm_config = {
     .can_id = DM_GIMBAL_CAN_ID,
@@ -85,6 +89,8 @@ static uint32_t s_last_feedback_seen_ms = 0u;
 static uint32_t s_last_target_tx_ms = 0u;
 static uint32_t s_last_feedback_log_ms = 0u;
 static uint32_t s_last_stale_log_ms = 0u;
+static uint32_t s_last_can_diag_log_ms = 0u;
+static uint32_t s_seen_can_recovery_count = 0u;
 static uint32_t s_auto_mode_start_ms = 0u;
 static uint32_t s_auto_mode_wait_ms = DM_AUTO_MODE_DELAY_MS;
 static uint8_t s_mode_attempt = 0u;
@@ -135,6 +141,8 @@ SystemStatus assemble_dm_motor(void) {
     s_last_target_tx_ms = now_ms;
     s_last_feedback_log_ms = now_ms;
     s_last_stale_log_ms = now_ms;
+    s_last_can_diag_log_ms = now_ms - DM_CAN_DIAG_LOG_PERIOD_MS;
+    s_seen_can_recovery_count = can_get_recovery_count(&hfdcan1);
     s_auto_mode_start_ms = now_ms;
     s_auto_mode_wait_ms = DM_AUTO_MODE_DELAY_MS;
     s_mode_attempt = 0u;
@@ -162,34 +170,14 @@ SystemStatus assemble_dm_motor(void) {
         return SYSTEM_STATUS_ERROR;
     }
 
-    /* 成功示例 motor_test_init(): disable -> 20 ms -> clear_error。 */
-    status = bus_motor.basic.disable((BusMotorId)DM_GIMBAL_LOGICAL_ID);
-    if(status != MOTOR_STATUS_OK) {
-        log_error("DM init disable failed: %s", bus_motor.status_str(status));
-        return SYSTEM_STATUS_ERROR;
-    }
-    log_info("DM init disable ok");
-
-    delay_ms(DM_INIT_CLEAR_DELAY_MS);
-    status = dm_motor_clear_error((BusMotorId)DM_GIMBAL_LOGICAL_ID);
-    if(status != MOTOR_STATUS_OK) {
-        log_error("DM init clear error failed: %s", bus_motor.status_str(status));
-        return SYSTEM_STATUS_ERROR;
-    }
-    log_info("DM init clear error ok");
-
-    /* 与示例相同：清错后原子丢弃初始化阶段的旧反馈/故障事件。 */
-    {
-        uint32_t primask = __get_PRIMASK();
-        __disable_irq();
-        s_feedback_updated = false;
-        s_fault_pending = false;
-        s_fault_code = 0u;
-        s_feedback = (BusMotorFeedback){ 0 };
-        if(primask == 0u) {
-            __enable_irq();
-        }
-    }
+    /*
+     * Do not transmit motor commands during boot. The MCU can reach this point
+     * before the motor rail/transceivers are ready; with CAN auto-retransmit a
+     * single unacknowledged frame can drive TEC to Bus-Off before entry_loop()
+     * starts. clear-error/disable/mode/enable are therefore performed by the
+     * runtime handshake after the system-wide 500 ms settle delay.
+     */
+    log_info("DM init transport ready; motor commands deferred to runtime");
 
     s_feedback_seen = false;
     s_enabled = false;
@@ -210,6 +198,16 @@ void assemble_dm_motor_process(void) {
     bool fault_pending = false;
     uint8_t fault_code = 0u;
     uint32_t primask;
+    uint32_t recovery_count = can_get_recovery_count(&hfdcan1);
+
+    if(recovery_count != s_seen_can_recovery_count) {
+        s_seen_can_recovery_count = recovery_count;
+        if(!s_fault_latched) {
+            log_warn("DM CAN recovery observed count=%lu; restart POS_VEL handshake",
+                     (unsigned long)recovery_count);
+            dm_restart_runtime_handshake(now, DM_AUTO_MODE_DELAY_MS);
+        }
+    }
 
     primask = __get_PRIMASK();
     __disable_irq();
@@ -241,7 +239,8 @@ void assemble_dm_motor_process(void) {
         return;
     }
 
-    if(s_runtime_state == DM_RUNTIME_WAIT_AUTO_MODE &&
+    if(can_tx_ready(&hfdcan1) &&
+       s_runtime_state == DM_RUNTIME_WAIT_AUTO_MODE &&
        (uint32_t)(now - s_auto_mode_start_ms) >= s_auto_mode_wait_ms) {
         s_mode_attempt++;
         log_info("DM runtime POS_VEL entry attempt=%u/%u", s_mode_attempt, DM_MODE_MAX_RETRY);
@@ -261,9 +260,12 @@ void assemble_dm_motor_process(void) {
         else {
             s_enabled = false;
             s_hold_target_ready = false;
-            s_runtime_state = DM_RUNTIME_FAILED;
-            log_error("DM POS_VEL entry failed after %u attempts", DM_MODE_MAX_RETRY);
+            log_error("DM POS_VEL entry failed after %u attempts; retry cycle in %u ms",
+                      DM_MODE_MAX_RETRY,
+                      DM_MODE_RETRY_FOREVER_DELAY_MS);
             dm_log_rx_diagnostic();
+            dm_log_can_diagnostic("POS_VEL entry");
+            dm_restart_runtime_handshake(now, DM_MODE_RETRY_FOREVER_DELAY_MS);
         }
     }
 
@@ -286,29 +288,36 @@ void assemble_dm_motor_process(void) {
         }
     }
 
-    if(s_runtime_state == DM_RUNTIME_READY && s_enabled && !s_fault_latched &&
+    if(can_tx_ready(&hfdcan1) &&
+       s_runtime_state == DM_RUNTIME_READY && s_enabled && !s_fault_latched &&
        s_hold_target_ready &&
        (uint32_t)(now - s_last_target_tx_ms) >= DM_TARGET_TX_PERIOD_MS) {
         s_last_target_tx_ms = now;
         if(!dm_send_current_target()) {
-            log_warn("DM target resend failed");
+            dm_log_can_diagnostic("target resend");
         }
     }
 
-    if(s_feedback_seen && !dm_feedback_is_fresh(now) &&
-       (uint32_t)(now - s_last_stale_log_ms) >= DM_STALE_LOG_PERIOD_MS) {
-        s_last_stale_log_ms = now;
-        log_warn("DM feedback stale age=%lu ms; reject new yaw target",
-                 (unsigned long)(now - s_last_feedback_seen_ms));
+    if(s_feedback_seen && !dm_feedback_is_fresh(now)) {
+        if((uint32_t)(now - s_last_stale_log_ms) >= DM_STALE_LOG_PERIOD_MS) {
+            s_last_stale_log_ms = now;
+            log_warn("DM feedback stale; restart POS_VEL handshake age=%lu ms",
+                     (unsigned long)(now - s_last_feedback_seen_ms));
+            dm_log_can_diagnostic("feedback stale");
+        }
+        if(!s_fault_latched) {
+            dm_restart_runtime_handshake(now, DM_MODE_RETRY_DELAY_MS);
+        }
     }
 }
 
 bool assemble_dm_motor_has_feedback(void) {
-    return s_feedback_seen;
+    return dm_feedback_is_fresh(HAL_GetTick());
 }
 
 bool assemble_dm_motor_is_ready(void) {
-    return s_runtime_state == DM_RUNTIME_READY &&
+    return can_tx_ready(&hfdcan1) &&
+           s_runtime_state == DM_RUNTIME_READY &&
            s_enabled &&
            !s_fault_latched &&
            s_hold_target_ready &&
@@ -318,7 +327,7 @@ bool assemble_dm_motor_is_ready(void) {
 bool assemble_dm_motor_get_position(float* position) {
     uint32_t primask;
 
-    if(position == NULL || !s_feedback_seen) {
+    if(position == NULL || !dm_feedback_is_fresh(HAL_GetTick())) {
         return false;
     }
 
@@ -362,8 +371,11 @@ static bool dm_enter_pos_vel_reference(void) {
     BusMotorStatus status;
     BusMotorStatus cleanup_status;
 
-    /* 成功示例 motor_test_set_mode(POS_VEL) 的原始顺序。 */
-    status = bus_motor.basic.disable((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+    /* Runtime sequence: clear fault -> disable -> select POS_VEL -> enable. */
+    status = dm_motor_clear_error((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+    if(status == MOTOR_STATUS_OK) {
+        status = bus_motor.basic.disable((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+    }
     if(status == MOTOR_STATUS_OK) {
         status = bus_motor.profile.activate((BusMotorId)DM_GIMBAL_LOGICAL_ID,
                                             BUS_MOTOR_PROFILE_POSITION);
@@ -378,6 +390,7 @@ static bool dm_enter_pos_vel_reference(void) {
                   bus_motor.status_str(status),
                   bus_motor.status_str(cleanup_status));
         dm_log_rx_diagnostic();
+        dm_log_can_diagnostic("mode switch");
         return false;
     }
 
@@ -387,7 +400,8 @@ static bool dm_enter_pos_vel_reference(void) {
 static void dm_try_enter_ready(uint32_t now_ms, const BusMotorFeedback* feedback) {
     BusMotorStatus status;
 
-    if(feedback == NULL || s_runtime_state != DM_RUNTIME_WAIT_FEEDBACK ||
+    if(feedback == NULL || !can_tx_ready(&hfdcan1) ||
+       s_runtime_state != DM_RUNTIME_WAIT_FEEDBACK ||
        !s_enabled || s_fault_latched) {
         return;
     }
@@ -401,9 +415,10 @@ static void dm_try_enter_ready(uint32_t now_ms, const BusMotorFeedback* feedback
     if(status != MOTOR_STATUS_OK) {
         s_hold_target_ready = false;
         s_enabled = false;
-        s_runtime_state = DM_RUNTIME_FAILED;
         (void)bus_motor.basic.disable((BusMotorId)DM_GIMBAL_LOGICAL_ID);
-        log_error("DM initial hold failed: %s", bus_motor.status_str(status));
+        log_error("DM initial hold failed: %s; restart handshake", bus_motor.status_str(status));
+        dm_log_can_diagnostic("initial hold");
+        dm_restart_runtime_handshake(now_ms, DM_MODE_RETRY_DELAY_MS);
         return;
     }
 
@@ -411,6 +426,50 @@ static void dm_try_enter_ready(uint32_t now_ms, const BusMotorFeedback* feedback
     s_last_target_tx_ms = now_ms;
     s_runtime_state = DM_RUNTIME_READY;
     log_info("DM ready: hold current pos=%.3f rad", (double)feedback->position);
+}
+
+static void dm_restart_runtime_handshake(uint32_t now_ms, uint32_t delay_ms) {
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    s_feedback_updated = false;
+    s_feedback_seen = false;
+    if(primask == 0u) {
+        __enable_irq();
+    }
+
+    s_enabled = false;
+    s_hold_target_ready = false;
+    s_runtime_state = DM_RUNTIME_WAIT_AUTO_MODE;
+    s_mode_attempt = 0u;
+    s_auto_mode_start_ms = now_ms;
+    s_auto_mode_wait_ms = delay_ms;
+    (void)dm_motor_invalidate_mode_confirmation((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+}
+
+static void dm_log_can_diagnostic(const char* action) {
+    BspCanHealth health;
+    uint32_t now = HAL_GetTick();
+
+    if((uint32_t)(now - s_last_can_diag_log_ms) < DM_CAN_DIAG_LOG_PERIOD_MS) {
+        return;
+    }
+    s_last_can_diag_log_ms = now;
+
+    if(can_get_health(&hfdcan1, &health) == STM32_HAL_CAN_OK) {
+        log_warn("DM CAN %s can=%s lec=%lu fault_lec=%lu fault_irq=0x%lX busoff=%lu txerr=%lu rxerr=%lu free=%lu fail=%lu recovery=%lu",
+                 action,
+                 can_error_code_to_str(health.last_tx_status),
+                 (unsigned long)health.last_error_code,
+                 (unsigned long)health.last_fault_error_code,
+                 (unsigned long)health.last_fault_irq_flags,
+                 (unsigned long)health.bus_off,
+                 (unsigned long)health.tx_error_count,
+                 (unsigned long)health.rx_error_count,
+                 (unsigned long)health.tx_fifo_free_level,
+                 (unsigned long)health.consecutive_tx_failures,
+                 (unsigned long)health.recovery_count);
+    }
 }
 
 static bool dm_motor_can_send(uint32_t id, const uint8_t* data, uint8_t len) {

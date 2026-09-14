@@ -1,6 +1,7 @@
 #ifndef _stm32_hal_can_h_
 #define _stm32_hal_can_h_
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "main.h" // IWYU pragma: keep
@@ -29,7 +30,10 @@ extern FDCAN_HandleTypeDef hfdcan2;
     X(TX_MAILBOX_TIMEOUT, "CAN TX Mailbox Timeout") \
     X(TX_FAILED, "CAN TX Failed") \
     X(RX_FAILED, "CAN RX Failed") \
-    X(NO_CALLBACK_SLOT, "No CAN RX Callback Slot")
+    X(NO_CALLBACK_SLOT, "No CAN RX Callback Slot") \
+    X(DIAGNOSTIC_FAILED, "CAN Diagnostic Failed") \
+    X(RECOVERY_IN_PROGRESS, "CAN Recovery In Progress") \
+    X(RECOVERY_FAILED, "CAN Recovery Failed")
 
 /**
  * @brief STM32 HAL CAN 抽象层状态码
@@ -39,6 +43,42 @@ typedef enum {
     STM32_HAL_CAN_STATUS_TABLE
 } BspCanStatus;
 #undef X
+
+/**
+ * @brief CAN 运行时健康快照
+ * @details 用于区分“发送 API 失败”和“总线错误/Bus-Off”，并观察共享总线恢复次数。
+ */
+typedef struct {
+    BspCanStatus last_tx_status;
+    uint32_t total_tx_failures;
+    uint32_t consecutive_tx_failures;
+    uint32_t tx_fifo_free_level;
+    uint32_t last_error_code;
+    uint32_t activity;
+    uint32_t error_passive;
+    uint32_t warning;
+    uint32_t bus_off;
+    uint32_t tx_error_count;
+    uint32_t rx_error_count;
+    uint32_t recovery_count;
+    bool recovery_in_progress;
+    uint32_t recovery_backoff_ms;
+    uint32_t recovery_started_ms;
+    uint32_t last_recovery_error_code;
+    uint32_t last_recovery_bus_off;
+    uint32_t last_recovery_tx_error_count;
+    uint32_t last_recovery_rx_error_count;
+    uint32_t last_recovery_tx_fifo_free_level;
+    uint32_t last_fault_irq_flags;
+    uint32_t last_fault_event_ms;
+    uint32_t last_fault_error_code;
+    uint32_t last_fault_activity;
+    uint32_t last_fault_error_passive;
+    uint32_t last_fault_warning;
+    uint32_t last_fault_bus_off;
+    uint32_t last_fault_tx_error_count;
+    uint32_t last_fault_rx_error_count;
+} BspCanHealth;
 
 /**
  * @brief CAN 接收回调函数类型
@@ -94,5 +134,38 @@ BspCanStatus can_register_rx_callback(FDCAN_HandleTypeDef* hcan, STM32HalCanRxCa
  * @return const char* 状态码名称
  */
 const char* can_error_code_to_str(BspCanStatus status);
+
+/**
+ * @brief 获取 CAN 当前健康状态
+ */
+BspCanStatus can_get_health(FDCAN_HandleTypeDef* hcan, BspCanHealth* health);
+
+/**
+ * @brief 服务共享 CAN 总线的自动恢复
+ * @param hcan CAN 句柄
+ * @param recovered 可选输出，本次调用是否完成了一次恢复
+ * @return BspCanStatus 状态码
+ * @details Bus-Off 时只清除 M_CAN CCCR.INIT 并等待硬件完成 129 次 Bus Idle 恢复序列，
+ *          不再循环 Stop/Start。TX FIFO 卡死时只清理挂起帧并进入退避期。
+ */
+BspCanStatus can_service_recovery(FDCAN_HandleTypeDef* hcan, bool* recovered);
+
+/**
+ * @brief 当前总线是否允许业务层继续发送
+ * @details Bus-Off 恢复和退避期间返回 false，防止电机层继续填充 TX FIFO。
+ */
+bool can_tx_ready(FDCAN_HandleTypeDef* hcan);
+
+/**
+ * @brief 获取指定 CAN 总线累计恢复次数
+ */
+uint32_t can_get_recovery_count(FDCAN_HandleTypeDef* hcan);
+
+
+/**
+ * @brief Platform CAN API version used to detect stale incremental-build objects.
+ */
+#define STM32_HAL_CAN_API_VERSION 0x00050000u
+uint32_t stm32_hal_can_api_version(void);
 
 #endif

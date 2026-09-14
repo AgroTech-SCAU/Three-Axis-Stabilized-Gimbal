@@ -11,7 +11,11 @@
 #define HT_PITCH_MOTOR_ID          2u
 #define HT_ROLL_MOTOR_ID           8u
 #define HT_FEEDBACK_PERIOD_MS      20u
+#define HT_DISCOVERY_PERIOD_MS      250u
+#define HT_DISCOVERY_MAX_PERIOD_MS  4000u
 #define HT_TARGET_TX_PERIOD_MS     10u
+#define HT_FEEDBACK_STALE_TIMEOUT_MS 200u
+#define HT_CAN_DIAG_LOG_PERIOD_MS   1000u
 #define HT_TWO_PI                   6.28318530717958647692f
 #define HT_TEST_MOTOR_COUNT         2u
 
@@ -24,13 +28,23 @@ static uint8_t ht_motor_rx_length(uint32_t data_length);
 static float ht_motor_wrap_one_turn(float position);
 static float ht_motor_nearest_absolute_target(float current_position,
     float encoder_target);
+static bool ht_feedback_is_fresh(uint8_t idx, uint32_t now_ms);
+static void ht_handle_can_recovery(uint32_t now_ms);
+static void ht_log_can_diagnostic(const char* action, uint16_t id, BusMotorStatus motor_status, uint32_t now_ms);
 
 static volatile bool s_feedback_updated[HT_TEST_MOTOR_COUNT];
 static BusMotorFeedback s_feedback[HT_TEST_MOTOR_COUNT];
 static volatile float s_raw_position[HT_TEST_MOTOR_COUNT];
+static volatile bool s_feedback_seen[HT_TEST_MOTOR_COUNT];
+static volatile uint32_t s_last_feedback_seen_ms[HT_TEST_MOTOR_COUNT];
 static uint32_t s_last_feedback_request_ms[HT_TEST_MOTOR_COUNT];
 static uint32_t s_last_target_tx_ms[HT_TEST_MOTOR_COUNT];
 static bool s_position_command_sent[HT_TEST_MOTOR_COUNT];
+static bool s_stop_command_sent[HT_TEST_MOTOR_COUNT];
+static bool s_discovery_logged[HT_TEST_MOTOR_COUNT];
+static uint32_t s_discovery_period_ms[HT_TEST_MOTOR_COUNT];
+static uint32_t s_last_can_diag_log_ms;
+static uint32_t s_seen_can_recovery_count;
 static const uint16_t s_ht_motor_ids[HT_TEST_MOTOR_COUNT] = { HT_PITCH_MOTOR_ID, HT_ROLL_MOTOR_ID };
 static const HtMotorDeviceProfile s_ht_motor_profiles[HT_TEST_MOTOR_COUNT] = {
     { HT_PITCH_MOTOR_ID, HT_MOTOR_MODEL_4438_30 },
@@ -72,6 +86,22 @@ SystemStatus assemble_ht_motor(void) {
 
     log_info("HT begin");
 
+    for(i = 0u; i < HT_TEST_MOTOR_COUNT; ++i) {
+        s_feedback_updated[i] = false;
+        s_feedback[i] = (BusMotorFeedback){ 0 };
+        s_raw_position[i] = 0.0f;
+        s_feedback_seen[i] = false;
+        s_last_feedback_seen_ms[i] = 0u;
+        s_last_feedback_request_ms[i] = HAL_GetTick();
+        s_last_target_tx_ms[i] = 0u;
+        s_position_command_sent[i] = false;
+        s_stop_command_sent[i] = false;
+        s_discovery_logged[i] = false;
+        s_discovery_period_ms[i] = HT_DISCOVERY_PERIOD_MS;
+    }
+    s_last_can_diag_log_ms = 0u;
+    s_seen_can_recovery_count = can_get_recovery_count(&hfdcan1);
+
     can_status = can_register_rx_callback(&hfdcan1, ht_motor_can_rx_callback, NULL);
     if(can_status != STM32_HAL_CAN_OK) {
         log_error("HT rx callback: %s", can_error_code_to_str(can_status));
@@ -102,17 +132,12 @@ SystemStatus assemble_ht_motor(void) {
     }
     log_info("HT driver ready");
 
-    log_info("HT stop tx");
-    for(i = 0u; i < HT_TEST_MOTOR_COUNT; ++i) {
-        status = ht_motor_instance.stop(s_ht_motor_ids[i]);
-        if(status != MOTOR_STATUS_OK) {
-            log_error("HT_MOTOR stop id=%u failed: %s",
-                      s_ht_motor_ids[i],
-                      ht_motor_instance.status_str(status));
-            return SYSTEM_STATUS_ERROR;
-        }
-    }
-    log_info("HT waiting for encoder feedback");
+    /*
+     * Safe-stop is deliberately deferred to the runtime loop. This gives the
+     * motor power rail/transceivers the remaining boot-settle time and avoids
+     * entering Bus-Off before the recovery service is running.
+     */
+    log_info("HT safe stop deferred to runtime; waiting for encoder feedback");
 
     log_info("HT ready: Classic CAN pitch=4438-30(id=%u) roll=5047-36(id=%u) on FDCAN1",
              HT_PITCH_MOTOR_ID,
@@ -125,12 +150,84 @@ void assemble_ht_motor_process(void) {
     BusMotorStatus status;
     uint8_t i;
 
+    ht_handle_can_recovery(now);
+
     for(i = 0u; i < HT_TEST_MOTOR_COUNT; ++i) {
-        if((uint32_t)(now - s_last_feedback_request_ms[i]) >= HT_FEEDBACK_PERIOD_MS) {
+        bool fresh = ht_feedback_is_fresh(i, now);
+
+        if(s_feedback_seen[i] && !fresh) {
+            uint32_t primask = __get_PRIMASK();
+            __disable_irq();
+            s_feedback_seen[i] = false;
+            s_position_command_sent[i] = false;
+            s_stop_command_sent[i] = false;
+            s_discovery_period_ms[i] = HT_DISCOVERY_PERIOD_MS;
+            if(primask == 0u) {
+                __enable_irq();
+            }
+            fresh = false;
+            if((uint32_t)(now - s_last_can_diag_log_ms) >= HT_CAN_DIAG_LOG_PERIOD_MS) {
+                s_last_can_diag_log_ms = now;
+                log_warn("HT feedback stale id=%u age=%lu ms; return to discovery",
+                         s_ht_motor_ids[i],
+                         (unsigned long)(now - s_last_feedback_seen_ms[i]));
+            }
+        }
+
+        /*
+         * Never hammer an unready CAN bus at the normal 20 ms feedback rate.
+         * Before the first valid reply (or after feedback goes stale), send a
+         * single discovery query only every 250 ms.  This gives motor power
+         * rails/transceivers time to boot and prevents application-level retry
+         * traffic from driving TEC to Bus-Off when no node is ready to ACK.
+         */
+        if(!fresh) {
+            if(can_tx_ready(&hfdcan1) &&
+               (uint32_t)(now - s_last_feedback_request_ms[i]) >= s_discovery_period_ms[i]) {
+                uint32_t next_period;
+
+                s_last_feedback_request_ms[i] = now;
+                status = ht_motor_request_feedback(s_ht_motor_ids[i]);
+                if(status != MOTOR_STATUS_OK) {
+                    ht_log_can_diagnostic("discovery", s_ht_motor_ids[i], status, now);
+                }
+                else {
+                    if(!s_discovery_logged[i]) {
+                        s_discovery_logged[i] = true;
+                        log_info("HT discovery id=%u query sent; waiting first feedback",
+                                 s_ht_motor_ids[i]);
+                    }
+
+                    /* Exponential backoff while the node is still silent. */
+                    next_period = s_discovery_period_ms[i] << 1u;
+                    if(next_period > HT_DISCOVERY_MAX_PERIOD_MS ||
+                       next_period < s_discovery_period_ms[i]) {
+                        next_period = HT_DISCOVERY_MAX_PERIOD_MS;
+                    }
+                    s_discovery_period_ms[i] = next_period;
+                }
+            }
+            continue;
+        }
+
+        /* Only command stop after the node has proved it is alive. */
+        if(can_tx_ready(&hfdcan1) && !s_stop_command_sent[i]) {
+            status = ht_motor_instance.stop(s_ht_motor_ids[i]);
+            if(status != MOTOR_STATUS_OK) {
+                ht_log_can_diagnostic("safe stop", s_ht_motor_ids[i], status, now);
+                continue;
+            }
+            s_stop_command_sent[i] = true;
+            s_last_feedback_request_ms[i] = now;
+            continue;
+        }
+
+        if(can_tx_ready(&hfdcan1) &&
+           (uint32_t)(now - s_last_feedback_request_ms[i]) >= HT_FEEDBACK_PERIOD_MS) {
             s_last_feedback_request_ms[i] = now;
             status = ht_motor_request_feedback(s_ht_motor_ids[i]);
             if(status != MOTOR_STATUS_OK) {
-                log_error("HT feedback request %u: %s", s_ht_motor_ids[i], ht_motor_instance.status_str(status));
+                ht_log_can_diagnostic("feedback request", s_ht_motor_ids[i], status, now);
             }
         }
     }
@@ -160,11 +257,6 @@ void assemble_ht_motor_process(void) {
             (void)raw_position;
             (void)position_mrad;
             (void)speed_mrad_s;
-            // log_info("HT id=%u pos=%ld speed=%ld err=%u",
-            //     s_ht_motor_ids[i],
-            //     (long)position_mrad,
-            //     (long)speed_mrad_s,
-            //     feedback.error_code);
         }
     }
 }
@@ -172,14 +264,15 @@ void assemble_ht_motor_process(void) {
 bool assemble_ht_motor_has_feedback(uint16_t id) {
     uint8_t idx = ht_motor_index_by_id(id);
 
-    return idx < HT_TEST_MOTOR_COUNT && s_feedback[idx].id == id;
+    return idx < HT_TEST_MOTOR_COUNT && ht_feedback_is_fresh(idx, HAL_GetTick());
 }
 
 bool assemble_ht_motor_get_raw_position(uint16_t id, float* position) {
     uint8_t idx = ht_motor_index_by_id(id);
     uint32_t primask;
+    uint32_t now = HAL_GetTick();
 
-    if(idx >= HT_TEST_MOTOR_COUNT || position == NULL || s_feedback[idx].id != id) {
+    if(idx >= HT_TEST_MOTOR_COUNT || position == NULL || !ht_feedback_is_fresh(idx, now)) {
         return false;
     }
 
@@ -200,7 +293,7 @@ bool assemble_ht_motor_set_target_position(uint16_t id, float position) {
     float current_position = 0.0f;
     uint32_t now = HAL_GetTick();
 
-    if(idx >= HT_TEST_MOTOR_COUNT) {
+    if(idx >= HT_TEST_MOTOR_COUNT || !can_tx_ready(&hfdcan1)) {
         return false;
     }
 
@@ -217,7 +310,7 @@ bool assemble_ht_motor_set_target_position(uint16_t id, float position) {
     if(!s_position_command_sent[idx]) {
         status = ht_motor_instance.enable(id);
         if(status != MOTOR_STATUS_OK) {
-            log_error("HT enable failed id=%u: %s", id, ht_motor_instance.status_str(status));
+            ht_log_can_diagnostic("enable", id, status, now);
             return false;
         }
         s_position_command_sent[idx] = true;
@@ -230,7 +323,7 @@ bool assemble_ht_motor_set_target_position(uint16_t id, float position) {
 
     status = ht_motor_instance.set_pos(id, target_position);
     if(status != MOTOR_STATUS_OK) {
-        log_error("HT target failed id=%u: %s", id, ht_motor_instance.status_str(status));
+        ht_log_can_diagnostic("target", id, status, now);
         return false;
     }
     s_last_target_tx_ms[idx] = now;
@@ -241,15 +334,17 @@ bool assemble_ht_motor_set_target_position(uint16_t id, float position) {
 bool assemble_ht_motor_set_target_position_speed(uint16_t id, float position, float speed) {
     uint8_t idx = ht_motor_index_by_id(id);
     BusMotorStatus status;
+    uint32_t now = HAL_GetTick();
 
-    if(idx >= HT_TEST_MOTOR_COUNT) {
+    if(idx >= HT_TEST_MOTOR_COUNT || !can_tx_ready(&hfdcan1) ||
+       !ht_feedback_is_fresh(idx, now)) {
         return false;
     }
 
     if(!s_position_command_sent[idx]) {
         status = ht_motor_instance.enable(id);
         if(status != MOTOR_STATUS_OK) {
-            log_error("HT enable failed id=%u: %s", id, ht_motor_instance.status_str(status));
+            ht_log_can_diagnostic("enable pos_vel", id, status, now);
             return false;
         }
         s_position_command_sent[idx] = true;
@@ -257,7 +352,7 @@ bool assemble_ht_motor_set_target_position_speed(uint16_t id, float position, fl
 
     status = ht_motor_instance.set_pos_vel(id, position, speed);
     if(status != MOTOR_STATUS_OK) {
-        log_error("HT target pos_vel failed id=%u: %s", id, ht_motor_instance.status_str(status));
+        ht_log_can_diagnostic("target pos_vel", id, status, now);
         return false;
     }
 
@@ -267,15 +362,17 @@ bool assemble_ht_motor_set_target_position_speed(uint16_t id, float position, fl
 bool assemble_ht_motor_set_target_speed(uint16_t id, float speed) {
     uint8_t idx = ht_motor_index_by_id(id);
     BusMotorStatus status;
+    uint32_t now = HAL_GetTick();
 
-    if(idx >= HT_TEST_MOTOR_COUNT) {
+    if(idx >= HT_TEST_MOTOR_COUNT || !can_tx_ready(&hfdcan1) ||
+       !ht_feedback_is_fresh(idx, now)) {
         return false;
     }
 
     if(!s_position_command_sent[idx]) {
         status = ht_motor_instance.enable(id);
         if(status != MOTOR_STATUS_OK) {
-            log_error("HT enable failed id=%u: %s", id, ht_motor_instance.status_str(status));
+            ht_log_can_diagnostic("enable speed", id, status, now);
             return false;
         }
         s_position_command_sent[idx] = true;
@@ -283,7 +380,7 @@ bool assemble_ht_motor_set_target_speed(uint16_t id, float speed) {
 
     status = ht_motor_instance.set_spd(id, speed);
     if(status != MOTOR_STATUS_OK) {
-        log_error("HT speed failed id=%u: %s", id, ht_motor_instance.status_str(status));
+        ht_log_can_diagnostic("speed", id, status, now);
         return false;
     }
 
@@ -316,9 +413,94 @@ static void ht_motor_can_rx_callback(FDCAN_HandleTypeDef* hcan,
                 s_raw_position[idx] = feedback.position;
                 feedback.position = ht_motor_wrap_one_turn(feedback.position);
                 s_feedback[idx] = feedback;
+                s_last_feedback_seen_ms[idx] = HAL_GetTick();
+                s_feedback_seen[idx] = true;
                 s_feedback_updated[idx] = true;
+                s_discovery_period_ms[idx] = HT_DISCOVERY_PERIOD_MS;
             }
         }
+    }
+}
+
+static bool ht_feedback_is_fresh(uint8_t idx, uint32_t now_ms) {
+    bool seen;
+    uint32_t last_ms;
+    uint32_t primask;
+
+    if(idx >= HT_TEST_MOTOR_COUNT) {
+        return false;
+    }
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    seen = s_feedback_seen[idx];
+    last_ms = s_last_feedback_seen_ms[idx];
+    if(primask == 0u) {
+        __enable_irq();
+    }
+
+    return seen && (uint32_t)(now_ms - last_ms) <= HT_FEEDBACK_STALE_TIMEOUT_MS;
+}
+
+static void ht_handle_can_recovery(uint32_t now_ms) {
+    uint32_t recovery_count = can_get_recovery_count(&hfdcan1);
+    uint8_t i;
+
+    if(recovery_count == s_seen_can_recovery_count) {
+        return;
+    }
+
+    s_seen_can_recovery_count = recovery_count;
+    {
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        for(i = 0u; i < HT_TEST_MOTOR_COUNT; ++i) {
+            s_feedback_seen[i] = false;
+            s_feedback_updated[i] = false;
+            s_position_command_sent[i] = false;
+            s_stop_command_sent[i] = false;
+            s_discovery_logged[i] = false;
+            s_discovery_period_ms[i] = HT_DISCOVERY_PERIOD_MS;
+            s_last_feedback_request_ms[i] = now_ms;
+            s_last_target_tx_ms[i] = now_ms;
+        }
+        if(primask == 0u) {
+            __enable_irq();
+        }
+    }
+    log_warn("HT CAN recovery observed count=%lu; feedback/enable handshake reset",
+             (unsigned long)recovery_count);
+}
+
+static void ht_log_can_diagnostic(const char* action,
+                                  uint16_t id,
+                                  BusMotorStatus motor_status,
+                                  uint32_t now_ms) {
+    BspCanHealth health;
+
+    if((uint32_t)(now_ms - s_last_can_diag_log_ms) < HT_CAN_DIAG_LOG_PERIOD_MS) {
+        return;
+    }
+    s_last_can_diag_log_ms = now_ms;
+
+    if(can_get_health(&hfdcan1, &health) == STM32_HAL_CAN_OK) {
+        log_error("HT %s id=%u: %s can=%s lec=%lu fault_lec=%lu fault_irq=0x%lX busoff=%lu txerr=%lu rxerr=%lu free=%lu fail=%lu recovery=%lu",
+                  action,
+                  id,
+                  ht_motor_instance.status_str(motor_status),
+                  can_error_code_to_str(health.last_tx_status),
+                  (unsigned long)health.last_error_code,
+                  (unsigned long)health.last_fault_error_code,
+                  (unsigned long)health.last_fault_irq_flags,
+                  (unsigned long)health.bus_off,
+                  (unsigned long)health.tx_error_count,
+                  (unsigned long)health.rx_error_count,
+                  (unsigned long)health.tx_fifo_free_level,
+                  (unsigned long)health.consecutive_tx_failures,
+                  (unsigned long)health.recovery_count);
+    }
+    else {
+        log_error("HT %s id=%u: %s", action, id, ht_motor_instance.status_str(motor_status));
     }
 }
 

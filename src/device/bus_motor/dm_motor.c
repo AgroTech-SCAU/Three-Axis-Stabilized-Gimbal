@@ -263,6 +263,17 @@ bool dm_motor_parse_parameter_frame(uint32_t frame_id, const uint8_t data[DM_MOT
     return true;
 }
 
+BusMotorStatus dm_motor_invalidate_mode_confirmation(BusMotorId motor_id) {
+    DmMotorInstance* context = dm_motor_registry_find_by_motor_id(&s_registry, motor_id);
+
+    if(context == 0) {
+        return MOTOR_STATUS_NOT_FOUND;
+    }
+
+    context->mode_confirmed = false;
+    return MOTOR_STATUS_OK;
+}
+
 /**
  * @brief 清除指定达妙电机错误
  */

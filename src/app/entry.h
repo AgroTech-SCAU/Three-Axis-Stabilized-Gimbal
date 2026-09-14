@@ -18,6 +18,7 @@
 #include "pc_comms.h"
 #include "pi_comms.h"
 #include "remote.h"
+#include "stm32_hal_can.h"
 #include "vision_comms.h"
 
 #include <math.h>
@@ -31,9 +32,12 @@
  */
 static bool init_ok = false;
 
+#define ROBOT_FW_TAG "robot-can-v5-20260914"
+#define ENTRY_VISION_ENABLED 1
 #define ENTRY_GIMBAL_CONTROL_PERIOD_MS 20u
 #define ENTRY_GIMBAL_HOLD_PERIOD_MS 50u
 #define ENTRY_GIMBAL_LOG_PERIOD_MS 100u
+#define ENTRY_VISION_LOG_PERIOD_MS 5000u
 #define ENTRY_RAD_TO_DEG 57.29577951308232f
 #define ENTRY_GIMBAL_ROLL_MOTOR_ID 8u
 #define ENTRY_GIMBAL_PITCH_MOTOR_ID 2u
@@ -100,6 +104,11 @@ static ms_t s_entry_gimbal_hold_timer = 0u;
 static ms_t s_entry_gimbal_log_timer = 0u;
 static ms_t s_entry_vision_log_timer = 0u;
 static ms_t s_entry_vision_vofa_timer = 0u;
+static ms_t s_entry_motor_bus_wait_log_timer = 0u;
+static bool s_entry_motor_bus_ht_ready_logged = false;
+static ms_t s_entry_can1_recovery_error_log_timer = 0u;
+static ms_t s_entry_can1_recovery_progress_log_timer = 0u;
+static bool s_entry_can1_recovery_active = false;
 #if ENTRY_GIMBAL_YAW_ENABLE
 static ms_t s_entry_gimbal_yaw_control_timer = 0u;
 static ms_t s_entry_gimbal_yaw_log_timer = 0u;
@@ -170,6 +179,7 @@ static inline float entry_wrap_pi(float angle);
 static inline float entry_wrap_one_turn(float position);
 static inline float entry_nearest_absolute_target(float current_position, float encoder_target);
 static inline void entry_update_gimbal_fast_angle_guard(float roll_angle, float pitch_angle);
+static inline bool entry_motor_bus_ht_ready(void);
 
 // ! ========================= 接 口 函 数 实 现 ========================= ! //
 
@@ -184,6 +194,10 @@ static inline void entry_init(void) {
     if(assemble_log() != SYSTEM_STATUS_OK)
         return;
     log_info("BOOT log ready");
+    log_info("FW tag=%s vision=%s motor_boot=HT_DISCOVERY_THEN_DM can_api=0x%08lx",
+             ROBOT_FW_TAG,
+             ENTRY_VISION_ENABLED ? "on" : "off",
+             (unsigned long)stm32_hal_can_api_version());
 
     if(assemble_imu() != SYSTEM_STATUS_OK)
         return;
@@ -200,10 +214,12 @@ static inline void entry_init(void) {
     log_info("BOOT ht motor ready");
     delay_ms(100u);
 
+#if ENTRY_VISION_ENABLED
     if(assemble_vision_comms() != SYSTEM_STATUS_OK)
         return;
-    log_info("BOOT vision comms ready");
+    log_info("BOOT vision comms ready (external source optional)");
     delay_ms(100u);
+#endif
 
 #if 0 /* Gimbal HT test: disable chassis, arm and application services. */
 
@@ -283,11 +299,90 @@ static inline void entry_loop(void) {
         return;
     }
 
-    assemble_dm_motor_process();
+    {
+        bool can1_recovered = false;
+        BspCanStatus can1_status = can_service_recovery(&hfdcan1, &can1_recovered);
+        BspCanHealth health;
+        bool have_health = can_get_health(&hfdcan1, &health) == STM32_HAL_CAN_OK;
+
+        if(have_health && health.recovery_in_progress && !s_entry_can1_recovery_active) {
+            s_entry_can1_recovery_active = true;
+            log_warn("CAN1 recovery started cause_lec=%lu fault_irq=0x%lX fault_lec=%lu fault_act=%lu fault_ep=%lu fault_warn=%lu fault_busoff=%lu fault_txerr=%lu fault_rxerr=%lu free=%lu backoff=%lu ms",
+                     (unsigned long)health.last_recovery_error_code,
+                     (unsigned long)health.last_fault_irq_flags,
+                     (unsigned long)health.last_fault_error_code,
+                     (unsigned long)health.last_fault_activity,
+                     (unsigned long)health.last_fault_error_passive,
+                     (unsigned long)health.last_fault_warning,
+                     (unsigned long)health.last_fault_bus_off,
+                     (unsigned long)health.last_fault_tx_error_count,
+                     (unsigned long)health.last_fault_rx_error_count,
+                     (unsigned long)health.last_recovery_tx_fifo_free_level,
+                     (unsigned long)health.recovery_backoff_ms);
+        }
+
+        if(have_health && health.recovery_in_progress && s_entry_can1_recovery_active &&
+           delay_nb_ms(&s_entry_can1_recovery_progress_log_timer, 2000u)) {
+            log_warn("CAN1 recovery waiting age=%lu ms lec=%lu act=%lu ep=%lu busoff=%lu txerr=%lu rxerr=%lu free=%lu",
+                     (unsigned long)(HAL_GetTick() - health.recovery_started_ms),
+                     (unsigned long)health.last_error_code,
+                     (unsigned long)health.activity,
+                     (unsigned long)health.error_passive,
+                     (unsigned long)health.bus_off,
+                     (unsigned long)health.tx_error_count,
+                     (unsigned long)health.rx_error_count,
+                     (unsigned long)health.tx_fifo_free_level);
+        }
+
+        if(can1_recovered) {
+            s_entry_can1_recovery_active = false;
+            if(have_health) {
+                log_warn("CAN1 recovery complete count=%lu lec=%lu act=%lu busoff=%lu txerr=%lu rxerr=%lu free=%lu",
+                         (unsigned long)health.recovery_count,
+                         (unsigned long)health.last_error_code,
+                         (unsigned long)health.activity,
+                         (unsigned long)health.bus_off,
+                         (unsigned long)health.tx_error_count,
+                         (unsigned long)health.rx_error_count,
+                         (unsigned long)health.tx_fifo_free_level);
+            }
+            else {
+                log_warn("CAN1 recovery complete");
+            }
+        }
+        else if(can1_status != STM32_HAL_CAN_OK &&
+                delay_nb_ms(&s_entry_can1_recovery_error_log_timer, 1000u)) {
+            log_error("CAN1 recovery service: %s", can_error_code_to_str(can1_status));
+        }
+    }
+
+    /*
+     * Bring the shared motor bus up deterministically:
+     * 1) HT sends only slow discovery probes until both motors answer.
+     * 2) A real HT reply proves FDCAN1 + transceiver + physical bus are alive.
+     * 3) Only then may the DM mode-switch handshake start.
+     * This avoids a power-up race where several command producers hammer an
+     * unready bus and accumulate TEC until Error Passive / Bus-Off.
+     */
     assemble_ht_motor_process();
-    entry_process_gimbal_level();
+    if(entry_motor_bus_ht_ready()) {
+        if(!s_entry_motor_bus_ht_ready_logged) {
+            s_entry_motor_bus_ht_ready_logged = true;
+            log_info("MOTOR BUS verified by HT feedback; DM handshake released");
+        }
+        assemble_dm_motor_process();
+    }
+    else if(delay_nb_ms(&s_entry_motor_bus_wait_log_timer, 1000u)) {
+        log_info("MOTOR BUS discovery: waiting for HT id=2/8 feedback before DM handshake");
+    }
+
+    if(assemble_dm_motor_is_ready()) {
+        entry_process_gimbal_level();
+    }
+#if ENTRY_VISION_ENABLED
     vision_comms_process();
     entry_process_vision_level();
+#endif
 
 #if 0 /* Gimbal HT test: no chassis/arm periodic traffic. */
     if(tim6_500hz_flag) {
@@ -751,12 +846,17 @@ static inline void entry_process_gimbal_yaw(float yaw_angle) {
 #endif
 }
 
+static inline bool entry_motor_bus_ht_ready(void) {
+    return assemble_ht_motor_has_feedback(ENTRY_GIMBAL_PITCH_MOTOR_ID) &&
+           assemble_ht_motor_has_feedback(ENTRY_GIMBAL_ROLL_MOTOR_ID);
+}
+
 static inline void entry_process_vision_level(void) {
     VisionLevelResult result;
 
     if(!vision_comms_get_result(&result) ||
        !vision_comms_result_is_fresh(ENTRY_VISION_RESULT_TIMEOUT_MS)) {
-        if(delay_nb_ms(&s_entry_vision_log_timer, ENTRY_GIMBAL_LOG_PERIOD_MS)) {
+        if(delay_nb_ms(&s_entry_vision_log_timer, ENTRY_VISION_LOG_PERIOD_MS)) {
             log_warn("VISION no fresh data (online=%d)",
                      (int)vision_comms_is_online());
         }
