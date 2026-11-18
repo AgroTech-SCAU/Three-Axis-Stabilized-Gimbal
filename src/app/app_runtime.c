@@ -44,7 +44,7 @@ static UserIoIndicator app_runtime_indicator(const GimbalState* state) {
     if(!initialized || state->fault) {
         return USER_IO_INDICATOR_FAULT;
     }
-    if(state->running) {
+    if(state->running && !state->run_waiting) {
         return USER_IO_INDICATOR_RUN;
     }
     return USER_IO_INDICATOR_WAIT;

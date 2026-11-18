@@ -27,7 +27,7 @@ typedef enum {
  * @brief 云台实际运行状态对应的指示灯状态
  */
 typedef enum {
-    USER_IO_INDICATOR_WAIT = 0, /**< 红慢闪：初始化或标定 */
+    USER_IO_INDICATOR_WAIT = 0, /**< 红快闪：初始化、标定或反馈等待 */
     USER_IO_INDICATOR_RUN,      /**< 熄灭：正常运行 */
     USER_IO_INDICATOR_FAULT,    /**< 红快闪：异常或安全锁存 */
 } UserIoIndicator;

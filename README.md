@@ -14,9 +14,8 @@ STM32H723 三轴增稳云台，达妙与高擎共用 FDCAN1
 
 | 状态 | RGB |
 |---|---|
-| 初始化、标定、反馈等待 | 红慢闪，500 ms 翻转 |
-| 故障 | 红快闪，125 ms 翻转 |
-| RUN，包括恢复窗口内的短暂等待 | 熄灭 |
+| 初始化、标定、反馈等待、故障、安全停止 | 红快闪，125 ms 翻转 |
+| 其他状态 | 熄灭 |
 
 ## 坐标
 
@@ -55,24 +54,18 @@ WAIT 每次 RUN 最多额外输出一次，FAULT 保存首次异常和停止时�
 
 保留现有 Interface、配置/PortOps、Doxygen 和分区格式
 
-算法与参数见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+姿态见 `src/service/attitude.c`，控制见 `src/domain/gimbal_control.c`，参数见 `src/service/assemble/gimbal_config.c`
 
 ## 构建
 
-保留 EIDE 工作区，也可用 Python 与 Arm GNU Toolchain
+将同名源码更新到现有 EIDE 工程
 
-```bash
-python3 tools/build_arm.py --compiler /path/to/arm-none-eabi-gcc
-python3 tools/build_arm.py --compiler /path/to/arm-none-eabi-gcc --config Release
-```
-
-输出位于 `build/Debug` 或 `build/Release`，脚本不烧录
+本包沿用上传包的文件范围，HAL、CMSIS 和其余 CubeMX 生成文件需保留本地版本
 
 ## 验证
 
-```bash
-python3 tools/test_host.py
-python3 tools/check_frozen_motor.py
-```
+RGB、运行状态和灯驱动相关的 3 套既有测试共 33 个独立测试进程通过
 
-结果见 [docs/VALIDATION.md](docs/VALIDATION.md)
+验证使用独立测试目录，测试文件和构建产物不加入源码包
+
+本次未做上板验证
