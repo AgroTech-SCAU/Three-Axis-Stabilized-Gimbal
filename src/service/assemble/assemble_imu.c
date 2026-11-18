@@ -13,7 +13,7 @@ SystemStatus assemble_imu(void) {
     const uint16_t accel_int_pin = stm32_bmi088_get_accel_int_pin();
     const uint16_t gyro_int_pin = stm32_bmi088_get_gyro_int_pin();
 
-    if(imu_set_instance(&bmi088_blocking_instance) != IMU_STATUS_OK) {
+    if(imu_set_instance(&bmi088_instance) != IMU_STATUS_OK) {
         return SYSTEM_STATUS_ERROR;
     }
 

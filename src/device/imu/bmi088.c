@@ -1,4 +1,4 @@
-﻿#include "bmi088.h"
+#include "bmi088.h"
 #include "imu_attitude.h"
 
 #include <math.h>
@@ -20,7 +20,7 @@
 #define BMI088_GYRO_2000_SEN                0.0010652644360316953f
 
 #define BMI088_DMA_GYRO_FRAME_LEN           7U
-#define BMI088_DMA_ACCEL_FRAME_LEN          8U
+#define BMI088_DMA_ACCEL_FRAME_LEN          20U /* 0x12..0x23, including temperature */
 #define BMI088_SPI_DUMMY_BYTE               0x55U
 #define BMI088_TEMP_UPDATE_PERIOD_US        100000U
 #define BMI088_GYRO_STALE_TIMEOUT_US        10000U
@@ -124,8 +124,6 @@ static void bmi088_async_init(void);
 static void bmi088_notify_gyro_data_ready(void);
 static void bmi088_notify_accel_data_ready(void);
 static bool bmi088_async_poll(void);
-static bool bmi088_async_get_gyro(float gyro[3]);
-static bool bmi088_async_get_accel(float accel[3]);
 static void bmi088_spi_txrx_complete(void* spi_handle);
 static void bmi088_spi_error(void* spi_handle);
 
@@ -163,11 +161,9 @@ static uint16_t s_bmi088_gyro_int_pin = 0U;
 static volatile Bmi088DmaState s_bmi088_dma_state = BMI088_DMA_IDLE;
 static volatile bool s_bmi088_gyro_pending = false;
 static volatile bool s_bmi088_accel_pending = false;
-static volatile bool s_bmi088_gyro_ready = false;
-static volatile bool s_bmi088_accel_ready = false;
 
-__attribute__((section(".ram_d2"), aligned(32))) static uint8_t s_bmi088_tx[BMI088_DMA_ACCEL_FRAME_LEN];
-__attribute__((section(".ram_d2"), aligned(32))) static uint8_t s_bmi088_rx[BMI088_DMA_ACCEL_FRAME_LEN];
+__attribute__((section(".ram_d2"), aligned(32))) static uint8_t s_bmi088_tx[32];
+__attribute__((section(".ram_d2"), aligned(32))) static uint8_t s_bmi088_rx[32];
 
 static float s_bmi088_gyro_dma[3];
 static float s_bmi088_accel_dma[3];
@@ -201,6 +197,67 @@ static Bmi088Error s_bmi088_init_error = BMI088_ERROR_NO_ERROR;
 static float s_bmi088_temp = 0.0f;
 static bool s_bmi088_is_initialized = false;
 static volatile Bmi088AsyncNext s_bmi088_async_next = BMI088_ASYNC_NEXT_GYRO;
+
+
+#define BMI088_QUEUE_SIZE 16U
+typedef struct { ImuSample sample; uint32_t sequence; } Bmi088QueuedSample;
+static Bmi088QueuedSample s_queue[BMI088_QUEUE_SIZE];
+static uint32_t s_queue_head, s_queue_tail, s_queue_count;
+static Bmi088AsyncStats s_stats;
+static volatile bool s_async_enabled;
+static volatile bool s_async_fault;
+static uint32_t s_gyro_pending_us, s_accel_pending_us, s_transfer_us;
+static uint32_t s_accel_completed_us;
+static bool s_accel_valid;
+static float s_temp_dma;
+static Bmi088Snapshot s_snapshot;
+static bool s_snapshot_valid;
+static uint32_t bmi088_lock(void) { return s_bmi088_ops->critical_enter(); }
+static void bmi088_unlock(uint32_t key) { s_bmi088_ops->critical_exit(key); }
+
+/* Called only while the short acquisition critical section is held. */
+static void bmi088_publish_gyro(void) {
+    Bmi088QueuedSample *slot;
+    if(s_queue_count == BMI088_QUEUE_SIZE) {
+        s_queue_tail = (s_queue_tail + 1U) % BMI088_QUEUE_SIZE;
+        --s_queue_count;
+        ++s_stats.queue_overruns;
+    }
+    slot = &s_queue[s_queue_head];
+    slot->sample = (ImuSample){0};
+    slot->sample.gyro = bmi088_make_gyro(s_bmi088_gyro_dma);
+    slot->sample.gyro_timestamp_us = s_transfer_us;
+    slot->sample.flags = IMU_SAMPLE_GYRO_NEW | IMU_SAMPLE_GYRO_VALID;
+    if(s_accel_valid) {
+        slot->sample.acc = bmi088_make_acc(s_bmi088_accel_dma);
+        slot->sample.acc_timestamp_us = s_accel_completed_us;
+        slot->sample.temperature = s_temp_dma;
+        slot->sample.temp_timestamp_us = s_accel_completed_us;
+        slot->sample.flags |= IMU_SAMPLE_ACC_VALID | IMU_SAMPLE_TEMP_VALID;
+    }
+    slot->sequence = ++s_stats.gyro_samples;
+    s_queue_head = (s_queue_head + 1U) % BMI088_QUEUE_SIZE;
+    ++s_queue_count;
+}
+
+bool bmi088_get_snapshot(Bmi088Snapshot *snapshot) {
+    /* Main-loop-only API: neither DMA nor ISR writes this object. */
+    if(snapshot == NULL || !s_snapshot_valid) return false;
+    *snapshot = s_snapshot;
+    return true;
+}
+
+bool bmi088_get_async_stats(Bmi088AsyncStats *stats) {
+    uint32_t key;
+    if(stats == NULL || s_bmi088_ops == NULL ||
+       s_bmi088_ops->critical_enter == NULL) return false;
+    key = bmi088_lock();
+    *stats = s_stats;
+    stats->queue_depth = s_queue_count;
+    stats->faulted = s_async_fault;
+    bmi088_unlock(key);
+    return true;
+}
 
 /**
  * @brief BMI088 通用 IMU 实例
@@ -378,6 +435,7 @@ bool bmi088_is_zru_enabled(void) {
  * @brief BMI088 EXTI 回调转发
  */
 void bmi088_exti_callback(uint16_t gpio_pin) {
+    if(!s_async_enabled || !s_bmi088_is_initialized || s_async_fault) return;
     if(gpio_pin == s_bmi088_gyro_int_pin) {
         bmi088_notify_gyro_data_ready();
     }
@@ -421,6 +479,8 @@ static ImuStatus bmi088_init_blocking(const void* config) {
  */
 static ImuStatus bmi088_init_common(const void* config, bool require_async_ops) {
     const Bmi088Config* bmi088_config = (const Bmi088Config*)config;
+    s_async_enabled = false;
+    s_bmi088_is_initialized = false;
 
     if(!bmi088_config_is_valid(bmi088_config, require_async_ops)) {
         return IMU_STATUS_INVALID_PARAM;
@@ -446,6 +506,7 @@ static ImuStatus bmi088_init_common(const void* config, bool require_async_ops) 
     }
 
     bmi088_attitude_init(&bmi088_config->attitude);
+    s_async_enabled = require_async_ops;
     return IMU_STATUS_OK;
 }
 
@@ -453,48 +514,46 @@ static ImuStatus bmi088_init_common(const void* config, bool require_async_ops) 
  * @brief 更新 BMI088 具体 IMU 实例缓存
  */
 static ImuStatus bmi088_update(void) {
-    float raw_acc[3] = { 0.0f };
-    float raw_gyro[3] = { 0.0f };
-    uint8_t sample_flags = s_bmi088_sample.flags &
-        (IMU_SAMPLE_ACC_VALID | IMU_SAMPLE_GYRO_VALID | IMU_SAMPLE_TEMP_VALID);
-    uint32_t now_us = 0U;
-    bool updated = false;
-
-    if(!s_bmi088_is_initialized) {
-        return IMU_STATUS_NOT_INITIALIZE;
-    }
-
+    Bmi088QueuedSample local;
+    uint32_t key;
+    if(!s_bmi088_is_initialized) return IMU_STATUS_NOT_INITIALIZE;
+    key = bmi088_lock();
+    if(s_async_fault) { bmi088_unlock(key); return IMU_STATUS_ERROR; }
     (void)bmi088_async_poll();
-    now_us = bmi088_now_us();
+    if(s_queue_count == 0U) { bmi088_unlock(key); return IMU_STATUS_NOT_READY; }
+    /* DMA writes only its own aligned buffer; this queue is CPU-owned. */
+    local = s_queue[s_queue_tail];
+    s_queue_tail = (s_queue_tail + 1U) % BMI088_QUEUE_SIZE;
+    --s_queue_count;
+    ++s_stats.consumed_samples;
+    bmi088_unlock(key);
 
-    if(bmi088_async_get_gyro(raw_gyro)) {
-        s_bmi088_gyro = bmi088_make_gyro(raw_gyro);
-        s_bmi088_sample.gyro = s_bmi088_gyro;
-        s_bmi088_sample.gyro_timestamp_us = now_us;
-        sample_flags |= IMU_SAMPLE_GYRO_NEW | IMU_SAMPLE_GYRO_VALID;
-        updated = true;
-    }
-
-    if(bmi088_async_get_accel(raw_acc)) {
-        if(bmi088_acc_sample_is_reasonable(raw_acc)) {
-            s_bmi088_acc = bmi088_make_acc(raw_acc);
-            s_bmi088_sample.acc = s_bmi088_acc;
-            s_bmi088_sample.acc_timestamp_us = now_us;
-            sample_flags |= IMU_SAMPLE_ACC_NEW | IMU_SAMPLE_ACC_VALID;
-            updated = true;
+    if(local.sample.flags & IMU_SAMPLE_ACC_VALID) {
+        float acc[3] = {local.sample.acc.x, local.sample.acc.y, local.sample.acc.z};
+        if(!bmi088_acc_sample_is_reasonable(acc)) {
+            local.sample.flags &= ~IMU_SAMPLE_ACC_VALID;
+        } else if(!(s_bmi088_sample.flags & IMU_SAMPLE_ACC_VALID) ||
+                  local.sample.acc_timestamp_us != s_bmi088_sample.acc_timestamp_us) {
+            local.sample.flags |= IMU_SAMPLE_ACC_NEW;
         }
+        if(!(s_bmi088_sample.flags & IMU_SAMPLE_TEMP_VALID) ||
+           local.sample.temp_timestamp_us != s_bmi088_sample.temp_timestamp_us)
+            local.sample.flags |= IMU_SAMPLE_TEMP_NEW;
     }
-
-    bmi088_update_temp_cache(now_us, &sample_flags);
-
-    if(!updated) {
-        return IMU_STATUS_NOT_READY;
-    }
-
-    s_bmi088_sample.flags = sample_flags;
-    bmi088_attitude_update();
+    s_bmi088_sample = local.sample;
+    s_bmi088_gyro = local.sample.gyro;
+    s_bmi088_acc = local.sample.acc;
+    s_bmi088_temp = local.sample.temperature;
+    bmi088_attitude_update(); /* Main context only. */
+    s_snapshot.sample = local.sample;
+    s_snapshot.angle = s_bmi088_angle;
+    s_snapshot.gyro_corrected = bmi088_get_gyro_corrected();
+    s_snapshot.sequence = local.sequence;
+    s_snapshot.calibrated = s_bmi088_attitude_enabled && s_bmi088_attitude.calibrated;
+    s_snapshot_valid = true;
     return IMU_STATUS_OK;
 }
+
 
 /**
  * @brief 以阻塞读取方式更新 BMI088 具体 IMU 实例缓存
@@ -784,10 +843,12 @@ static void bmi088_read_temp_raw(float* temperature) {
 static void bmi088_async_init(void) {
     s_bmi088_dma_state = BMI088_DMA_IDLE;
     s_bmi088_async_next = BMI088_ASYNC_NEXT_GYRO;
-    s_bmi088_gyro_pending = true;
-    s_bmi088_accel_pending = true;
-    s_bmi088_gyro_ready = false;
-    s_bmi088_accel_ready = false;
+    s_bmi088_gyro_pending = s_bmi088_accel_pending = false;
+    s_async_fault = false;
+    s_queue_head = s_queue_tail = s_queue_count = 0U;
+    s_accel_valid = s_snapshot_valid = false;
+    s_stats = (Bmi088AsyncStats){0};
+    s_snapshot = (Bmi088Snapshot){0};
     memset(s_bmi088_tx, 0, sizeof(s_bmi088_tx));
     memset(s_bmi088_rx, 0, sizeof(s_bmi088_rx));
     memset(s_bmi088_gyro_dma, 0, sizeof(s_bmi088_gyro_dma));
@@ -795,161 +856,121 @@ static void bmi088_async_init(void) {
     bmi088_release_all_cs();
 }
 
+
 /**
  * @brief 标记陀螺仪数据就绪
  */
 static void bmi088_notify_gyro_data_ready(void) {
+    uint32_t key = bmi088_lock();
+    ++s_stats.gyro_drdy;
+    if(s_bmi088_gyro_pending) ++s_stats.gyro_coalesced;
+    s_gyro_pending_us = bmi088_now_us();
     s_bmi088_gyro_pending = true;
+    (void)bmi088_async_poll();
+    bmi088_unlock(key);
 }
+
 
 /**
  * @brief 标记加速度计数据就绪
  */
 static void bmi088_notify_accel_data_ready(void) {
+    uint32_t key = bmi088_lock();
+    ++s_stats.accel_drdy;
+    if(s_bmi088_accel_pending) ++s_stats.accel_coalesced;
+    s_accel_pending_us = bmi088_now_us();
     s_bmi088_accel_pending = true;
+    (void)bmi088_async_poll();
+    bmi088_unlock(key);
 }
+
 
 /**
  * @brief 轮询并启动 BMI088 DMA 读取
  */
 static bool bmi088_async_poll(void) {
-    uint32_t now_us = 0U;
-    bool prefer_gyro = false;
-
-    if(s_bmi088_dma_state != BMI088_DMA_IDLE) {
+    bool gyro, started;
+    /* Caller holds critical section. No synthetic DRDY or blocking SPI. */
+    if(!s_async_enabled || s_async_fault || s_bmi088_dma_state != BMI088_DMA_IDLE)
         return false;
+    if(!s_bmi088_gyro_pending && !s_bmi088_accel_pending) return false;
+    gyro = s_bmi088_gyro_pending &&
+        (!s_bmi088_accel_pending || s_bmi088_async_next == BMI088_ASYNC_NEXT_GYRO);
+    s_transfer_us = gyro ? s_gyro_pending_us : s_accel_pending_us;
+    if(gyro) {
+        s_bmi088_gyro_pending = false;
+        started = bmi088_start_gyro_dma();
+        if(!started) s_bmi088_gyro_pending = true;
+        else s_bmi088_async_next = BMI088_ASYNC_NEXT_ACCEL;
+    } else {
+        s_bmi088_accel_pending = false;
+        started = bmi088_start_accel_dma();
+        if(!started) s_bmi088_accel_pending = true;
+        else s_bmi088_async_next = BMI088_ASYNC_NEXT_GYRO;
     }
-
-    now_us = bmi088_now_us();
-    if(!s_bmi088_gyro_pending &&
-        (s_bmi088_sample.gyro_timestamp_us == 0U ||
-            (now_us - s_bmi088_sample.gyro_timestamp_us) > BMI088_GYRO_STALE_TIMEOUT_US)) {
-        s_bmi088_gyro_pending = true;
-    }
-
-    if(!s_bmi088_accel_pending &&
-        (s_bmi088_sample.acc_timestamp_us == 0U ||
-            (now_us - s_bmi088_sample.acc_timestamp_us) > BMI088_ACCEL_STALE_TIMEOUT_US)) {
-        s_bmi088_accel_pending = true;
-    }
-
-    prefer_gyro = (s_bmi088_async_next == BMI088_ASYNC_NEXT_GYRO);
-
-    if(prefer_gyro) {
-        if(s_bmi088_gyro_pending) {
-            s_bmi088_gyro_pending = false;
-            if(bmi088_start_gyro_dma()) {
-                s_bmi088_async_next = BMI088_ASYNC_NEXT_ACCEL;
-                return true;
-            }
-
-            s_bmi088_gyro_pending = true;
-        }
-
-        if(s_bmi088_accel_pending) {
-            s_bmi088_accel_pending = false;
-            if(bmi088_start_accel_dma()) {
-                s_bmi088_async_next = BMI088_ASYNC_NEXT_GYRO;
-                return true;
-            }
-
-            s_bmi088_accel_pending = true;
-        }
-    }
-    else {
-        if(s_bmi088_accel_pending) {
-            s_bmi088_accel_pending = false;
-            if(bmi088_start_accel_dma()) {
-                s_bmi088_async_next = BMI088_ASYNC_NEXT_GYRO;
-                return true;
-            }
-
-            s_bmi088_accel_pending = true;
-        }
-
-        if(s_bmi088_gyro_pending) {
-            s_bmi088_gyro_pending = false;
-            if(bmi088_start_gyro_dma()) {
-                s_bmi088_async_next = BMI088_ASYNC_NEXT_ACCEL;
-                return true;
-            }
-
-            s_bmi088_gyro_pending = true;
-        }
-    }
-
-    return false;
+    if(!started) ++s_stats.dma_start_failures;
+    return started;
 }
+
 
 /**
  * @brief 获取最近一次 DMA 陀螺仪数据
  */
-static bool bmi088_async_get_gyro(float gyro[3]) {
-    if(gyro == 0 || !s_bmi088_gyro_ready) {
-        return false;
-    }
 
-    bmi088_copy_vector3(gyro, s_bmi088_gyro_dma);
-    s_bmi088_gyro_ready = false;
-    return true;
-}
+
 
 /**
  * @brief 获取最近一次 DMA 加速度数据
  */
-static bool bmi088_async_get_accel(float accel[3]) {
-    if(accel == 0 || !s_bmi088_accel_ready) {
-        return false;
-    }
 
-    bmi088_copy_vector3(accel, s_bmi088_accel_dma);
-    s_bmi088_accel_ready = false;
-    return true;
-}
+
 
 /**
  * @brief 处理 BMI088 SPI DMA 完成中断
  */
 static void bmi088_spi_txrx_complete(void* spi_handle) {
-    if(s_bmi088_ops == 0) {
-        return;
-    }
-
-    if(spi_handle != bmi088_get_spi_handle()) {
-        return;
-    }
-
+    uint32_t key;
+    if(!s_async_enabled || s_async_fault || s_bmi088_ops == NULL ||
+       spi_handle != bmi088_get_spi_handle()) return;
+    key = bmi088_lock();
     if(s_bmi088_dma_state == BMI088_DMA_GYRO) {
         bmi088_gyro_cs_high();
         bmi088_dma_maintain_after_finish(BMI088_DMA_GYRO_FRAME_LEN);
         bmi088_parse_gyro_dma_buffer();
-        s_bmi088_gyro_ready = true;
-    }
-    else if(s_bmi088_dma_state == BMI088_DMA_ACCEL) {
+        bmi088_publish_gyro();
+    } else if(s_bmi088_dma_state == BMI088_DMA_ACCEL) {
+        int16_t temp;
         bmi088_accel_cs_high();
         bmi088_dma_maintain_after_finish(BMI088_DMA_ACCEL_FRAME_LEN);
         bmi088_parse_accel_dma_buffer();
-        s_bmi088_accel_ready = true;
+        temp = (int16_t)((s_bmi088_rx[18] << 3) | (s_bmi088_rx[19] >> 5));
+        if(temp > 1023) temp -= 2048;
+        s_temp_dma = temp * BMI088_TEMP_FACTOR + BMI088_TEMP_OFFSET;
+        s_accel_completed_us = s_transfer_us;
+        s_accel_valid = true;
+        ++s_stats.accel_samples;
     }
-
     s_bmi088_dma_state = BMI088_DMA_IDLE;
+    (void)bmi088_async_poll();
+    bmi088_unlock(key);
 }
+
 
 /**
  * @brief 处理 BMI088 SPI 错误中断
  */
 static void bmi088_spi_error(void* spi_handle) {
-    if(s_bmi088_ops == 0) {
-        return;
-    }
-
-    if(spi_handle != bmi088_get_spi_handle()) {
-        return;
-    }
-
+    uint32_t key;
+    if(!s_async_enabled || s_bmi088_ops == NULL ||
+       spi_handle != bmi088_get_spi_handle()) return;
+    key = bmi088_lock();
+    ++s_stats.dma_errors;
+    s_async_fault = true; /* Stop until explicit reinitialization/reboot. */
+    s_queue_count = 0U;
     bmi088_release_all_cs();
-    s_bmi088_dma_state = BMI088_DMA_IDLE;
+    bmi088_unlock(key);
 }
+
 
 static uint32_t bmi088_now_ms(void) {
     return s_bmi088_ops->now_ms();
@@ -979,7 +1000,8 @@ static bool bmi088_config_is_valid(const Bmi088Config* config, bool require_asyn
     }
 
     if(require_async_ops &&
-        (ops->transmit_receive_dma == 0 || ops->get_spi_handle == 0)) {
+        (ops->transmit_receive_dma == 0 || ops->get_spi_handle == 0 ||
+         ops->critical_enter == 0 || ops->critical_exit == 0)) {
         return false;
     }
 

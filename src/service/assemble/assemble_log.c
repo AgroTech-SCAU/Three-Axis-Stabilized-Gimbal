@@ -14,7 +14,7 @@ static const LogPortOps log_ops = {
 SystemStatus assemble_log(void) {
     LogConfig log_config = {
         .ops = &log_ops,
-        .level = LOG_LEVEL_INFO,
+        .level = LOG_LEVEL_NONE, /* UART1 dedicated to VOFA FireWater while tuning. */
         .enable_color = true,
         .async_write = false,
     };

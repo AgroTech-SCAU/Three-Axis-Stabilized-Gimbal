@@ -25,7 +25,20 @@ static void stm32_bmi088_exti_callback(uint16_t gpio_pin, void* user);
 
 // ! ========================= 变 量 声 明 ========================= ! //
 
+static uint32_t bmi088_critical_enter(void) {
+    uint32_t key = __get_PRIMASK();
+    __disable_irq();
+    __DMB();
+    return key;
+}
+static void bmi088_critical_exit(uint32_t key) {
+    __DMB();
+    __set_PRIMASK(key);
+}
+
 static const Bmi088PortOps bmi088_ops = {
+    .critical_enter = bmi088_critical_enter,
+    .critical_exit = bmi088_critical_exit,
     .accel_cs_low = bmi088_accel_cs_low,
     .accel_cs_high = bmi088_accel_cs_high,
     .gyro_cs_low = bmi088_gyro_cs_low,

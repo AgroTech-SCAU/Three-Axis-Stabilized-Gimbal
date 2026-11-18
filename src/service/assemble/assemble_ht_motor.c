@@ -40,7 +40,13 @@ static volatile uint32_t s_last_feedback_seen_ms[HT_TEST_MOTOR_COUNT];
 static uint32_t s_last_feedback_request_ms[HT_TEST_MOTOR_COUNT];
 static uint32_t s_last_target_tx_ms[HT_TEST_MOTOR_COUNT];
 static bool s_position_command_sent[HT_TEST_MOTOR_COUNT];
+static bool s_control_active[HT_TEST_MOTOR_COUNT];
+static float s_control_speed[HT_TEST_MOTOR_COUNT];
+static uint32_t s_control_ms[HT_TEST_MOTOR_COUNT], s_control_timeout[HT_TEST_MOTOR_COUNT];
+static uint32_t s_cancel_attempt_ms[HT_TEST_MOTOR_COUNT];
 static bool s_stop_command_sent[HT_TEST_MOTOR_COUNT];
+static volatile uint32_t s_feedback_sequence[HT_TEST_MOTOR_COUNT];
+static uint32_t s_stop_feedback_sequence[HT_TEST_MOTOR_COUNT];
 static bool s_discovery_logged[HT_TEST_MOTOR_COUNT];
 static uint32_t s_discovery_period_ms[HT_TEST_MOTOR_COUNT];
 static uint32_t s_last_can_diag_log_ms;
@@ -95,6 +101,10 @@ SystemStatus assemble_ht_motor(void) {
         s_last_feedback_request_ms[i] = HAL_GetTick();
         s_last_target_tx_ms[i] = 0u;
         s_position_command_sent[i] = false;
+        s_control_active[i] = false;
+        s_control_speed[i] = 0.0f;
+        s_control_ms[i] = s_control_timeout[i] = s_cancel_attempt_ms[i] = 0u;
+        s_feedback_sequence[i] = s_stop_feedback_sequence[i] = 0u;
         s_stop_command_sent[i] = false;
         s_discovery_logged[i] = false;
         s_discovery_period_ms[i] = HT_DISCOVERY_PERIOD_MS;
@@ -151,6 +161,10 @@ void assemble_ht_motor_process(void) {
     uint8_t i;
 
     ht_handle_can_recovery(now);
+    for(uint8_t k=0; k<HT_TEST_MOTOR_COUNT; ++k) {
+        if(s_control_active[k] && (uint32_t)(now-s_control_ms[k])>s_control_timeout[k])
+            assemble_ht_motor_cancel_control(s_ht_motor_ids[k]);
+    }
 
     for(i = 0u; i < HT_TEST_MOTOR_COUNT; ++i) {
         bool fresh = ht_feedback_is_fresh(i, now);
@@ -159,6 +173,7 @@ void assemble_ht_motor_process(void) {
             uint32_t primask = __get_PRIMASK();
             __disable_irq();
             s_feedback_seen[i] = false;
+            s_control_active[i] = false;
             s_position_command_sent[i] = false;
             s_stop_command_sent[i] = false;
             s_discovery_period_ms[i] = HT_DISCOVERY_PERIOD_MS;
@@ -217,6 +232,8 @@ void assemble_ht_motor_process(void) {
                 ht_log_can_diagnostic("safe stop", s_ht_motor_ids[i], status, now);
                 continue;
             }
+            /* Enqueue success is not a stop acknowledgement. Require a later reply. */
+            s_stop_feedback_sequence[i] = s_feedback_sequence[i];
             s_stop_command_sent[i] = true;
             s_last_feedback_request_ms[i] = now;
             continue;
@@ -414,6 +431,7 @@ static void ht_motor_can_rx_callback(FDCAN_HandleTypeDef* hcan,
                 feedback.position = ht_motor_wrap_one_turn(feedback.position);
                 s_feedback[idx] = feedback;
                 s_last_feedback_seen_ms[idx] = HAL_GetTick();
+                ++s_feedback_sequence[idx];
                 s_feedback_seen[idx] = true;
                 s_feedback_updated[idx] = true;
                 s_discovery_period_ms[idx] = HT_DISCOVERY_PERIOD_MS;
@@ -457,6 +475,7 @@ static void ht_handle_can_recovery(uint32_t now_ms) {
         for(i = 0u; i < HT_TEST_MOTOR_COUNT; ++i) {
             s_feedback_seen[i] = false;
             s_feedback_updated[i] = false;
+            s_control_active[i] = false;
             s_position_command_sent[i] = false;
             s_stop_command_sent[i] = false;
             s_discovery_logged[i] = false;
@@ -543,4 +562,49 @@ static float ht_motor_nearest_absolute_target(float current_position,
         delta += HT_TWO_PI;
     }
     return current_position + delta;
+}
+
+/* Read-only coherent snapshot; return false for absent/stale feedback. */
+bool assemble_ht_motor_get_feedback_snapshot(uint16_t id, BusMotorFeedback* feedback) {
+    uint8_t idx = ht_motor_index_by_id(id);
+    if(idx >= HT_TEST_MOTOR_COUNT || feedback == NULL) return false;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    bool fresh = ht_feedback_is_fresh(idx, HAL_GetTick());
+    if(fresh) {
+        *feedback = s_feedback[idx];
+        feedback->position = s_raw_position[idx];
+    }
+    __set_PRIMASK(primask);
+    return fresh;
+}
+
+bool assemble_ht_motor_get_feedback_snapshot_age(uint16_t id, BusMotorFeedback *f, uint32_t *age) {
+    uint8_t i=ht_motor_index_by_id(id);
+    if(i>=HT_TEST_MOTOR_COUNT || !f || !age) return false;
+    uint32_t key=__get_PRIMASK(); __disable_irq();
+    bool ready=s_feedback_seen[i] && s_stop_command_sent[i] &&
+        s_feedback_sequence[i]!=s_stop_feedback_sequence[i];
+    *age=HAL_GetTick()-s_last_feedback_seen_ms[i];
+    if(ready) { *f=s_feedback[i]; f->position=s_raw_position[i]; }
+    __set_PRIMASK(key);
+    return ready && *age<=HT_FEEDBACK_STALE_TIMEOUT_MS && can_tx_ready(&hfdcan1);
+}
+bool assemble_ht_motor_set_control_target(uint16_t id, float position, float speed, uint32_t timeout_ms) {
+    uint8_t i=ht_motor_index_by_id(id);
+    if(i>=HT_TEST_MOTOR_COUNT || !timeout_ms || !isfinite(position) || !isfinite(speed) || speed<=0) return false;
+    if(!assemble_ht_motor_set_target_position_speed(id,position,speed)) return false;
+    s_control_active[i]=true; s_control_speed[i]=speed;
+    s_control_ms[i]=HAL_GetTick(); s_control_timeout[i]=timeout_ms;
+    return true;
+}
+void assemble_ht_motor_cancel_control(uint16_t id) {
+    uint8_t i=ht_motor_index_by_id(id); uint32_t now=HAL_GetTick();
+    if(i>=HT_TEST_MOTOR_COUNT || !s_control_active[i] || !can_tx_ready(&hfdcan1)) return;
+    if((uint32_t)(now-s_cancel_attempt_ms[i])<HT_TARGET_TX_PERIOD_MS) return;
+    s_cancel_attempt_ms[i]=now;
+    /* Best-effort hold at latest measured position. Cannot stop a disconnected motor. */
+    float q; uint32_t key=__get_PRIMASK(); __disable_irq(); q=s_raw_position[i]; __set_PRIMASK(key);
+    if(isfinite(q) && ht_motor_instance.set_pos_vel(id,q,s_control_speed[i])==MOTOR_STATUS_OK)
+        s_control_active[i]=false;
 }

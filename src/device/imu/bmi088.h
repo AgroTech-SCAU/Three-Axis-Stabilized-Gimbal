@@ -35,6 +35,8 @@ typedef enum {
  * @brief BMI088 平台端口函数表
  */
 typedef struct {
+    uint32_t (*critical_enter)(void); /**< Save interrupt mask and enter short critical section. */
+    void (*critical_exit)(uint32_t key); /**< Restore previous interrupt mask. */
     void (*accel_cs_low)(void);  /**< 拉低加速度计片选 */
     void (*accel_cs_high)(void); /**< 拉高加速度计片选 */
     void (*gyro_cs_low)(void);   /**< 拉低陀螺仪片选 */
@@ -87,6 +89,30 @@ extern const ImuInterface bmi088_instance;
  * @brief BMI088 阻塞读取 IMU 实例
  */
 extern const ImuInterface bmi088_blocking_instance;
+
+/** Main-loop-owned snapshot; angle and corrected gyro follow this sample's fusion update. */
+typedef struct {
+    ImuSample sample;
+    ImuAngle angle;
+    ImuGyro gyro_corrected;
+    uint32_t sequence;
+    bool calibrated;
+} Bmi088Snapshot;
+
+typedef struct {
+    uint32_t gyro_drdy, accel_drdy;
+    uint32_t gyro_samples, accel_samples, consumed_samples;
+    uint32_t gyro_coalesced, accel_coalesced;
+    uint32_t queue_overruns, dma_start_failures, dma_errors, queue_depth;
+    bool faulted;
+} Bmi088AsyncStats;
+
+/* Call update(), then copy snapshot from the SAME main-loop context.
+ * Snapshot copy is non-consuming; ISR/DMA never modifies it.
+ * Accel and gyro have separate DRDY timestamps, not simultaneous sampling.
+ */
+bool bmi088_get_snapshot(Bmi088Snapshot* snapshot);
+bool bmi088_get_async_stats(Bmi088AsyncStats* stats);
 
 // ! ========================= 接 口 函 数 声 明 ========================= ! //
 

@@ -33,15 +33,20 @@ void dwt_init(void) {
 uint32_t dwt_get_us(void) {
     uint32_t now_cycles;
     uint32_t delta_cycles;
+    uint32_t key, result;
 
     if(s_cycles_per_us == 0u) return 0u;
 
+    key = __get_PRIMASK();
+    __disable_irq();
     now_cycles = DWT->CYCCNT;
     delta_cycles = now_cycles - s_last_cyccnt;
     s_last_cyccnt = now_cycles;
     s_total_cycles += (uint64_t)delta_cycles;
 
-    return (uint32_t)(s_total_cycles / s_cycles_per_us);
+    result = (uint32_t)(s_total_cycles / s_cycles_per_us);
+    __set_PRIMASK(key);
+    return result;
 }
 
 // ! ========================= 私 有 函 数 实 现 ========================= ! //
