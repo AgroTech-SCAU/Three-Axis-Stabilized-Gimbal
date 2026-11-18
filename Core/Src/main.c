@@ -29,11 +29,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "entry.h"
-#include "stm32_hal_dwt.h"
-#include "stm32_hal_uart.h"
-#include <stdio.h>
-#include <math.h>
-#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -67,69 +62,6 @@ static void MPU_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-/* FireWater roll diagnostics, 100 Hz.
- * CH0 target-minus-encoder deg; CH1 camera roll error deg; CH2 active;
- * CH3 latched exit reason; CH4 exit count; CH5 feedback age ms;
- * CH6 validity bits (1=CH0 valid, 2=CH1 valid); CH7 UART dropped frames.
- * Invalid plotted angles are held, never replaced by a -9999 spike.
- * Target is a software command, not a motor acknowledgement.
- */
-#define MAIN_ROLL_TELEMETRY_PERIOD_MS 10u
-static volatile uint32_t s_main_telemetry_drop_count;
-static void main_roll_vofa_task(void) {
-    static uint32_t last_ms;
-    uint32_t now_ms=HAL_GetTick();
-    if((uint32_t)(now_ms-last_ms)<MAIN_ROLL_TELEMETRY_PERIOD_MS) return;
-    last_ms=now_ms;
-    BusMotorFeedback rm={0};
-    uint32_t age=UINT32_MAX;
-    bool ready=assemble_ht_motor_get_feedback_snapshot_age(ENTRY_GIMBAL_ROLL_MOTOR_ID,&rm,&age);
-    const GimbalControl *g=&s_entry_gimbal_control;
-    const GimbalStartup *a=&g->startup;
-    const float deg=57.29577951308232f;
-    float target=a->running?(g->roll.active?g->roll.command:NAN):
-        (a->captured?a->roll_position:NAN);
-    bool imu_fresh=s_entry_log_imu_seen &&
-        (uint32_t)(dwt_get_us()-s_entry_imu_snapshot.sample.gyro_timestamp_us)<=10000u;
-    float error=NAN;
-    if(g->reference.ready && imu_fresh) {
-        float e=g->reference.target.roll-s_entry_imu_snapshot.angle.roll;
-        error=atan2f(sinf(e),cosf(e))*deg;
-    }
-    static float last_difference, last_error;
-    bool difference_valid=isfinite(target) && ready && (rm.valid&BUS_MOTOR_FEEDBACK_POSITION);
-    bool error_valid=isfinite(error);
-    if(difference_valid) last_difference=(target-rm.position)*deg;
-    if(error_valid) last_error=error;
-    float channels[]={
-        last_difference,last_error,g->roll.active?1.0f:0.0f,
-        (float)g->roll.last_exit_reason,(float)g->roll.exit_count,
-        age!=UINT32_MAX?(float)age:-1.0f,
-        (float)((difference_valid?1u:0u)|(error_valid?2u:0u)),
-        (float)s_main_telemetry_drop_count
-    };
-    char line[192];
-    size_t used=5u;
-    memcpy(line,"roll:",used);
-    for(unsigned i=0;i<sizeof(channels)/sizeof(channels[0]);++i) {
-        /* Numeric sentinel keeps all channels parseable before data is ready.
-         * Integer formatting avoids newlib-nano float-printf dependency. */
-        float v=channels[i];
-        if(!isfinite(v) || fabsf(v)>=1.0e9f) v=-9999.0f;
-        double magnitude=fabs((double)v);
-        unsigned long whole=(unsigned long)magnitude;
-        unsigned long frac=(unsigned long)((magnitude-whole)*1000.0+0.5);
-        if(frac>=1000ul) { ++whole; frac=0; }
-        int n=snprintf(line+used,sizeof(line)-used,"%s%s%lu.%03lu",
-            i?",":"",signbit(v)?"-":"",whole,frac);
-        if(n<0 || (size_t)n>=sizeof(line)-used) { ++s_main_telemetry_drop_count; return; }
-        used+=(size_t)n;
-    }
-    if(used+2u>sizeof(line)) { ++s_main_telemetry_drop_count; return; }
-    line[used++]='\r'; line[used++]='\n';
-    if(!uart1_write_it(line,(uint32_t)used)) ++s_main_telemetry_drop_count;
-}
 
 /* USER CODE END 0 */
 
@@ -187,7 +119,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-        main_roll_vofa_task();
     }
   /* USER CODE END 3 */
 }

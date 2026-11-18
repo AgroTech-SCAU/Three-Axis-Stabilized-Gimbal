@@ -21,6 +21,9 @@ SystemStatus assemble_imu(void) {
         return SYSTEM_STATUS_ERROR;
     }
 
+    /* BMI088 只采集原始数据，attitude 服务独占姿态估计 */
+    bmi088_config.attitude.mode = IMU_ATTITUDE_NONE;
+
     stm32_bmi088_register_callbacks();
 
     status = imu.init(&bmi088_config);

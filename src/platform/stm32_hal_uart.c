@@ -1,4 +1,11 @@
+/**
+ * @file stm32_hal_uart.c
+ * @brief USART1 日志队列与命令接收
+ */
+
 #include "stm32_hal_uart.h"
+
+#include "usart.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -6,365 +13,259 @@
 // ! ========================= 变 量 声 明 ========================= ! //
 
 #define UART1_TX_QUEUE_SIZE 2048u
+#define UART1_RX_QUEUE_SIZE 256u
 
 typedef struct {
-    UART_HandleTypeDef* huart;
-    uint8_t* buffer;
-    uint16_t size;
+    uint8_t buffer[UART1_TX_QUEUE_SIZE];
     volatile uint16_t head;
     volatile uint16_t tail;
     volatile uint16_t active_len;
     volatile bool busy;
 } UartTxQueue;
 
-static uint8_t s_uart1_tx_buffer[UART1_TX_QUEUE_SIZE] = { 0 };
-static UartTxQueue s_uart1_tx = {
-    .huart = &huart1,
-    .buffer = s_uart1_tx_buffer,
-    .size = UART1_TX_QUEUE_SIZE,
-};
+static UartTxQueue s_uart1_tx;
+static uint8_t s_uart1_rx_buffer[UART1_RX_QUEUE_SIZE];
+static uint8_t s_uart1_rx_byte;
+static volatile uint16_t s_uart1_rx_head;
+static volatile uint16_t s_uart1_rx_tail;
+static volatile bool s_uart1_rx_initialized;
+static volatile bool s_uart1_rx_discard_line;
+static volatile bool s_uart1_rx_reset_pending;
+static volatile uint32_t s_uart1_rx_dropped;
 
-static bool uart_write_it(UartTxQueue* queue, const char* data, uint32_t len);
-static void uart_tx_start(UartTxQueue* queue);
-static void uart_tx_complete(UartTxQueue* queue);
-static void uart_tx_error(UartTxQueue* queue);
+// ! ========================= 私 有 函 数 声 明 ========================= ! //
 
-static PiTxHalResult s_uart10_last_tx_result = PI_TX_HAL_OK;
-
-static void (*uart1_tx_complete_callback)(void) = NULL;
-static void (*uart1_rx_complete_callback)(void) = NULL;
-static void (*uart1_rx_event_callback)(uint16_t size) = NULL;
-static void (*uart1_error_callback)(void) = NULL;
-
-static void (*uart5_rx_complete_callback)(void) = NULL;
-static void (*uart5_rx_event_callback)(uint16_t size) = NULL;
-static void (*uart5_error_callback)(void) = NULL;
-
-static void (*uart10_rx_complete_callback)(void) = NULL;
-static void (*uart10_rx_event_callback)(uint16_t size) = NULL;
-static void (*uart10_error_callback)(void) = NULL;
-
-static void (*uart7_rx_complete_callback)(void) = NULL;
-static void (*uart7_error_callback)(void) = NULL;
+static void uart_tx_start(void);
+static bool uart_rx_start(void);
+static void uart_rx_reset_line(void);
+static void uart_rx_push(uint8_t byte);
 
 // ! ========================= 接 口 函 数 实 现 ========================= ! //
 
-bool uart1_write(const char* data, uint32_t len) {
-    if(data == NULL || len == 0u || len > UINT16_MAX) {
-        return false;
-    }
-
-    return HAL_UART_Transmit_DMA(&huart1, (uint8_t*)data, (uint16_t)len) == HAL_OK;
-}
-
 bool uart1_write_it(const char* data, uint32_t len) {
-    return uart_write_it(&s_uart1_tx, data, len);
-}
-
-bool uart1_write_blocking(const char* data, uint32_t len) {
-    if(data == NULL || len == 0u || len > UINT16_MAX) {
-        return false;
-    }
-
-    return HAL_UART_Transmit(&huart1, (uint8_t*)data, (uint16_t)len, 10) == HAL_OK;
-}
-
-bool uart7_write_blocking(const char* data, uint32_t len) {
-    if(data == NULL || len == 0u || len > UINT16_MAX) {
-        return false;
-    }
-
-    return HAL_UART_Transmit(&huart7, (uint8_t*)data, (uint16_t)len, 10) == HAL_OK;
-}
-
-bool uart10_write_blocking(const char* data, uint32_t len) {
-    HAL_StatusTypeDef status;
-
-    if(data == NULL || len == 0u || len > UINT16_MAX) {
-        s_uart10_last_tx_result = PI_TX_HAL_ERROR;
-        return false;
-    }
-
-    status = HAL_UART_Transmit(&huart10, (uint8_t*)data, (uint16_t)len, 10);
-    switch(status) {
-        case HAL_OK:
-            s_uart10_last_tx_result = PI_TX_HAL_OK;
-            return true;
-
-        case HAL_BUSY:
-            s_uart10_last_tx_result = PI_TX_HAL_BUSY;
-            return false;
-
-        case HAL_TIMEOUT:
-            s_uart10_last_tx_result = PI_TX_HAL_TIMEOUT;
-            return false;
-
-        case HAL_ERROR:
-        default:
-            s_uart10_last_tx_result = PI_TX_HAL_ERROR;
-            return false;
-    }
-}
-
-PiTxHalResult uart10_get_last_tx_result(void) {
-    return s_uart10_last_tx_result;
-}
-
-bool uart_receive_it(UART_HandleTypeDef* huart, uint8_t* data, uint16_t len) {
-    if(huart == NULL || data == NULL || len == 0u) {
-        return false;
-    }
-
-    return HAL_UART_Receive_IT(huart, data, len) == HAL_OK;
-}
-
-bool uart_receive_to_idle_dma(UART_HandleTypeDef* huart, uint8_t* data, uint16_t len) {
-    HAL_StatusTypeDef status;
-
-    if(huart == NULL || data == NULL || len == 0u) {
-        return false;
-    }
-
-    __HAL_UART_CLEAR_PEFLAG(huart);
-    __HAL_UART_CLEAR_FEFLAG(huart);
-    __HAL_UART_CLEAR_NEFLAG(huart);
-    __HAL_UART_CLEAR_OREFLAG(huart);
-    __HAL_UART_CLEAR_IDLEFLAG(huart);
-
-    status = HAL_UARTEx_ReceiveToIdle_DMA(huart, data, len);
-    if(status != HAL_OK) {
-        return false;
-    }
-
-    if(huart->hdmarx != NULL) {
-        __HAL_DMA_DISABLE_IT(huart->hdmarx, DMA_IT_HT);
-    }
-
-    return true;
-}
-
-bool uart_abort_receive_it(UART_HandleTypeDef* huart) {
-    if(huart == NULL) {
-        return false;
-    }
-
-    return HAL_UART_AbortReceive_IT(huart) == HAL_OK;
-}
-
-bool uart_abort_receive_dma(UART_HandleTypeDef* huart) {
-    if(huart == NULL) {
-        return false;
-    }
-
-    return HAL_UART_AbortReceive(huart) == HAL_OK;
-}
-
-void uart_register_tx_complete_callback(UART_HandleTypeDef* huart, void (*callback)(void)) {
-    if(huart == &huart1) {
-        uart1_tx_complete_callback = callback;
-    }
-}
-
-void uart_register_rx_complete_callback(UART_HandleTypeDef* huart, void (*callback)(void)) {
-    if(huart == &huart1) {
-        uart1_rx_complete_callback = callback;
-    }
-    else if(huart == &huart5) {
-        uart5_rx_complete_callback = callback;
-    }
-    else if(huart == &huart10) {
-        uart10_rx_complete_callback = callback;
-    }
-    else if(huart == &huart7) {
-        uart7_rx_complete_callback = callback;
-    }
-}
-
-void uart_register_rx_event_callback(UART_HandleTypeDef* huart, void (*callback)(uint16_t size)) {
-    if(huart == &huart1) {
-        uart1_rx_event_callback = callback;
-    }
-    else if(huart == &huart5) {
-        uart5_rx_event_callback = callback;
-    }
-    else if(huart == &huart10) {
-        uart10_rx_event_callback = callback;
-    }
-}
-
-bool uart_rx_complete_callback_registered(UART_HandleTypeDef* huart) {
-    if(huart == &huart1) {
-        return uart1_rx_complete_callback != NULL;
-    }
-    if(huart == &huart5) {
-        return uart5_rx_complete_callback != NULL;
-    }
-    if(huart == &huart10) {
-        return uart10_rx_complete_callback != NULL;
-    }
-    if(huart == &huart7) {
-        return uart7_rx_complete_callback != NULL;
-    }
-    return false;
-}
-
-void uart_register_error_callback(UART_HandleTypeDef* huart, void (*callback)(void)) {
-    if(huart == &huart1) {
-        uart1_error_callback = callback;
-    }
-    else if(huart == &huart5) {
-        uart5_error_callback = callback;
-    }
-    else if(huart == &huart10) {
-        uart10_error_callback = callback;
-    }
-    else if(huart == &huart7) {
-        uart7_error_callback = callback;
-    }
-}
-
-// ! ========================= HAL 回 调 实 现 ========================= ! //
-
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef* huart) {
-    if(huart == &huart1) {
-        uart_tx_complete(&s_uart1_tx);
-        if(uart1_tx_complete_callback != NULL) {
-            uart1_tx_complete_callback();
-        }
-    }
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
-    if(huart == &huart1 && uart1_rx_complete_callback != NULL) {
-        uart1_rx_complete_callback();
-    }
-    else if(huart == &huart5 && uart5_rx_complete_callback != NULL) {
-        uart5_rx_complete_callback();
-    }
-    else if(huart == &huart10 && uart10_rx_complete_callback != NULL) {
-        uart10_rx_complete_callback();
-    }
-    else if(huart == &huart7 && uart7_rx_complete_callback != NULL) {
-        uart7_rx_complete_callback();
-    }
-}
-
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart, uint16_t Size) {
-    if(huart == &huart1 && uart1_rx_event_callback != NULL) {
-        uart1_rx_event_callback(Size);
-    }
-    else if(huart == &huart5 && uart5_rx_event_callback != NULL) {
-        uart5_rx_event_callback(Size);
-    }
-    else if(huart == &huart10 && uart10_rx_event_callback != NULL) {
-        uart10_rx_event_callback(Size);
-    }
-}
-
-void HAL_UART_ErrorCallback(UART_HandleTypeDef* huart) {
-    if(huart == &huart1) {
-        uart_tx_error(&s_uart1_tx);
-        if(uart1_error_callback != NULL) {
-            uart1_error_callback();
-        }
-    }
-    else if(huart == &huart5 && uart5_error_callback != NULL) {
-        uart5_error_callback();
-    }
-    else if(huart == &huart10 && uart10_error_callback != NULL) {
-        uart10_error_callback();
-    }
-    else if(huart == &huart7 && uart7_error_callback != NULL) {
-        uart7_error_callback();
-    }
-}
-
-
-// ! ========================= USART1 非阻塞 TX 队列 ========================= ! //
-
-static bool uart_write_it(UartTxQueue* queue, const char* data, uint32_t len) {
     uint16_t used;
-    uint16_t free_len;
     uint16_t first_len;
     uint32_t primask;
 
-    if(queue == NULL || data == NULL || len == 0u || len >= queue->size) {
+    if(data == NULL || len == 0u || len >= UART1_TX_QUEUE_SIZE) {
         return false;
     }
 
     primask = __get_PRIMASK();
     __disable_irq();
-    if(queue->head >= queue->tail) {
-        used = (uint16_t)(queue->head - queue->tail);
-    }
-    else {
-        used = (uint16_t)(queue->size - queue->tail + queue->head);
-    }
-    free_len = (uint16_t)(queue->size - 1u - used);
-    if(len > free_len) {
+    used = (uint16_t)((s_uart1_tx.head + UART1_TX_QUEUE_SIZE - s_uart1_tx.tail) %
+                      UART1_TX_QUEUE_SIZE);
+    if(len > UART1_TX_QUEUE_SIZE - 1u - used) {
         if(primask == 0u) {
             __enable_irq();
         }
+        uart_tx_start();
         return false;
     }
 
-    first_len = (uint16_t)(queue->size - queue->head);
+    first_len = (uint16_t)(UART1_TX_QUEUE_SIZE - s_uart1_tx.head);
     if(first_len > len) {
         first_len = (uint16_t)len;
     }
-    memcpy(&queue->buffer[queue->head], data, first_len);
+    memcpy(&s_uart1_tx.buffer[s_uart1_tx.head], data, first_len);
     if(first_len < len) {
-        memcpy(queue->buffer, &data[first_len], len - first_len);
+        memcpy(s_uart1_tx.buffer, &data[first_len], len - first_len);
     }
-    queue->head = (uint16_t)((queue->head + len) % queue->size);
+    s_uart1_tx.head = (uint16_t)((s_uart1_tx.head + len) % UART1_TX_QUEUE_SIZE);
     if(primask == 0u) {
         __enable_irq();
     }
 
-    uart_tx_start(queue);
+    uart_tx_start();
     return true;
 }
 
-static void uart_tx_start(UartTxQueue* queue) {
+bool uart1_console_init(void) {
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    if(!s_uart1_rx_initialized) {
+        s_uart1_rx_head = 0u;
+        s_uart1_rx_tail = 0u;
+        s_uart1_rx_discard_line = false;
+        s_uart1_rx_reset_pending = false;
+        s_uart1_rx_dropped = 0u;
+        s_uart1_rx_initialized = true;
+    }
+    if(primask == 0u) {
+        __enable_irq();
+    }
+    return uart_rx_start();
+}
+
+bool uart1_read_byte(uint8_t* byte) {
+    uint32_t primask;
+    bool available = false;
+
+    if(byte == NULL || !s_uart1_rx_initialized) {
+        return false;
+    }
+    (void)uart_rx_start();
+    uart_tx_start();
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if(!s_uart1_rx_reset_pending && s_uart1_rx_head != s_uart1_rx_tail) {
+        *byte = s_uart1_rx_buffer[s_uart1_rx_tail];
+        s_uart1_rx_tail = (uint16_t)((s_uart1_rx_tail + 1u) % UART1_RX_QUEUE_SIZE);
+        available = true;
+    }
+    if(primask == 0u) {
+        __enable_irq();
+    }
+    return available;
+}
+
+bool uart1_take_rx_reset(void) {
+    uint32_t primask = __get_PRIMASK();
+    bool pending;
+
+    __disable_irq();
+    pending = s_uart1_rx_reset_pending;
+    s_uart1_rx_reset_pending = false;
+    if(primask == 0u) {
+        __enable_irq();
+    }
+    return pending;
+}
+
+uint32_t uart1_rx_dropped_count(void) {
+    uint32_t primask = __get_PRIMASK();
+    uint32_t dropped;
+
+    __disable_irq();
+    dropped = s_uart1_rx_dropped;
+    if(primask == 0u) {
+        __enable_irq();
+    }
+    return dropped;
+}
+
+// ! ========================= HAL 回 调 实 现 ========================= ! //
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef* huart) {
+    if(huart != &huart1 || !s_uart1_tx.busy) {
+        return;
+    }
+
+    s_uart1_tx.tail = (uint16_t)((s_uart1_tx.tail + s_uart1_tx.active_len) % UART1_TX_QUEUE_SIZE);
+    s_uart1_tx.active_len = 0u;
+    s_uart1_tx.busy = false;
+    uart_tx_start();
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
+    if(huart != &huart1 || !s_uart1_rx_initialized) {
+        return;
+    }
+    if(huart->ErrorCode != HAL_UART_ERROR_NONE) {
+        /* HAL 的错误分支可能先调用接收完成；此时重挂会清除 ErrorCode */
+        uart_rx_reset_line();
+        ++s_uart1_rx_dropped;
+        return;
+    }
+
+    uart_rx_push(s_uart1_rx_byte);
+    (void)uart_rx_start();
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef* huart) {
+    if(huart != &huart1 || !s_uart1_rx_initialized) {
+        return;
+    }
+
+    /* 接收错误只重置命令边界，不丢弃独立运行的日志发送队列 */
+    uart_rx_reset_line();
+    (void)uart_rx_start();
+}
+
+// ! ========================= 私 有 函 数 实 现 ========================= ! //
+
+/**
+ * @brief 从发送环启动一段连续传输，HAL 忙时保留数据等待主循环重试
+ */
+static void uart_tx_start(void) {
+    uint32_t primask = __get_PRIMASK();
     uint16_t len;
 
-    if(queue == NULL || queue->busy || queue->head == queue->tail) {
-        return;
+    __disable_irq();
+    if(!s_uart1_tx.busy && s_uart1_tx.head != s_uart1_tx.tail) {
+        len = s_uart1_tx.head > s_uart1_tx.tail ? (uint16_t)(s_uart1_tx.head - s_uart1_tx.tail) : (uint16_t)(UART1_TX_QUEUE_SIZE - s_uart1_tx.tail);
+        s_uart1_tx.active_len = len;
+        s_uart1_tx.busy = true;
+        if(HAL_UART_Transmit_IT(&huart1, &s_uart1_tx.buffer[s_uart1_tx.tail], len) != HAL_OK) {
+            s_uart1_tx.active_len = 0u;
+            s_uart1_tx.busy = false;
+        }
     }
-
-    if(queue->head > queue->tail) {
-        len = (uint16_t)(queue->head - queue->tail);
-    }
-    else {
-        len = (uint16_t)(queue->size - queue->tail);
-    }
-
-    queue->active_len = len;
-    queue->busy = true;
-    if(HAL_UART_Transmit_IT(queue->huart, &queue->buffer[queue->tail], len) != HAL_OK) {
-        queue->active_len = 0u;
-        queue->busy = false;
+    if(primask == 0u) {
+        __enable_irq();
     }
 }
 
-static void uart_tx_complete(UartTxQueue* queue) {
-    if(queue == NULL || !queue->busy) {
-        return;
-    }
+/**
+ * @brief 启动或恢复单字节接收，保留调用前的中断屏蔽状态
+ * @return 当前已有接收挂起时返回 true
+ */
+static bool uart_rx_start(void) {
+    uint32_t primask = __get_PRIMASK();
+    bool active;
 
-    queue->tail = (uint16_t)((queue->tail + queue->active_len) % queue->size);
-    queue->active_len = 0u;
-    queue->busy = false;
-    uart_tx_start(queue);
+    __disable_irq();
+    if(s_uart1_rx_initialized && huart1.RxState == HAL_UART_STATE_READY) {
+        /* 保留待处理的硬件错误标志，由 HAL IRQ 报错后统一重置命令边界 */
+        if(HAL_UART_Receive_IT(&huart1, &s_uart1_rx_byte, 1u) != HAL_OK) {
+            /* 重新挂接间隙可能丢字节，必须重新寻找完整命令的边界 */
+            uart_rx_reset_line();
+        }
+    }
+    active = s_uart1_rx_initialized && huart1.RxState == HAL_UART_STATE_BUSY_RX;
+    if(primask == 0u) {
+        __enable_irq();
+    }
+    return active;
 }
 
-static void uart_tx_error(UartTxQueue* queue) {
-    if(queue == NULL || !queue->busy) {
+/**
+ * @brief 清空环并丢弃至下一个 LF；仅在 ISR 或关中断区调用
+ */
+static void uart_rx_reset_line(void) {
+    s_uart1_rx_dropped += (uint16_t)((s_uart1_rx_head + UART1_RX_QUEUE_SIZE - s_uart1_rx_tail) %
+                                     UART1_RX_QUEUE_SIZE);
+    s_uart1_rx_head = 0u;
+    s_uart1_rx_tail = 0u;
+    s_uart1_rx_discard_line = true;
+    s_uart1_rx_reset_pending = true;
+}
+
+/**
+ * @brief 将收到的字节写入环；失步时丢弃完整行而不是输出截断的命令
+ * @param byte 本次中断收到的字节
+ */
+static void uart_rx_push(uint8_t byte) {
+    uint16_t next;
+
+    if(s_uart1_rx_discard_line) {
+        ++s_uart1_rx_dropped;
+        if(byte == '\n') {
+            s_uart1_rx_discard_line = false;
+        }
         return;
     }
-
-    queue->tail = (uint16_t)((queue->tail + queue->active_len) % queue->size);
-    queue->active_len = 0u;
-    queue->busy = false;
-    uart_tx_start(queue);
+    next = (uint16_t)((s_uart1_rx_head + 1u) % UART1_RX_QUEUE_SIZE);
+    if(next == s_uart1_rx_tail) {
+        uart_rx_reset_line();
+        ++s_uart1_rx_dropped;
+        if(byte == '\n') {
+            s_uart1_rx_discard_line = false;
+        }
+        return;
+    }
+    s_uart1_rx_buffer[s_uart1_rx_head] = byte;
+    s_uart1_rx_head = next;
 }

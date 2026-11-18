@@ -46,7 +46,7 @@ typedef enum {
 
 /**
  * @brief CAN 运行时健康快照
- * @details 用于区分“发送 API 失败”和“总线错误/Bus-Off”，并观察共享总线恢复次数。
+ * @details 用于区分“发送 API 失败”和“总线错误/Bus-Off”，并观察共享总线恢复次数
  */
 typedef struct {
     BspCanStatus last_tx_status;
@@ -145,14 +145,14 @@ BspCanStatus can_get_health(FDCAN_HandleTypeDef* hcan, BspCanHealth* health);
  * @param hcan CAN 句柄
  * @param recovered 可选输出，本次调用是否完成了一次恢复
  * @return BspCanStatus 状态码
- * @details Bus-Off 时只清除 M_CAN CCCR.INIT 并等待硬件完成 129 次 Bus Idle 恢复序列，
- *          不再循环 Stop/Start。TX FIFO 卡死时只清理挂起帧并进入退避期。
+ * @details Bus-Off 时只清除 M_CAN CCCR.INIT 并等待硬件完成 129 次 Bus Idle 恢复序列
+ *          不再循环 Stop/Start；TX FIFO 卡死时只清理挂起帧并进入退避期
  */
 BspCanStatus can_service_recovery(FDCAN_HandleTypeDef* hcan, bool* recovered);
 
 /**
  * @brief 当前总线是否允许业务层继续发送
- * @details Bus-Off 恢复和退避期间返回 false，防止电机层继续填充 TX FIFO。
+ * @details Bus-Off 恢复和退避期间返回 false，防止电机层继续填充 TX FIFO
  */
 bool can_tx_ready(FDCAN_HandleTypeDef* hcan);
 
@@ -163,7 +163,7 @@ uint32_t can_get_recovery_count(FDCAN_HandleTypeDef* hcan);
 
 
 /**
- * @brief Platform CAN API version used to detect stale incremental-build objects.
+ * @brief Platform CAN API version used to detect stale incremental-build objects
  */
 #define STM32_HAL_CAN_API_VERSION 0x00050000u
 uint32_t stm32_hal_can_api_version(void);

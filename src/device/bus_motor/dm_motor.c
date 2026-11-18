@@ -719,10 +719,10 @@ static BusMotorStatus dm_motor_driver_feedback(uint16_t instance, BusMotorFeedba
 /*
  * ========================= 旧 BusMotorInterface 兼容适配 =========================
  *
- * 现有底盘代码仍使用旧的“每种电机一个接口表”模型。DM/Yaw 主链完全不走
- * 这里，而是使用上面从 dm_ok 原样移植的 registry/profile 实现。这个适配器
+ * 现有底盘代码仍使用旧的“每种电机一个接口表”模型；DM/Yaw 主链完全不走
+ * 这里，而是使用上面从 dm_ok 原样移植的 registry/profile 实现；这个适配器
  * 仅用于保持旧源文件可编译，并在旧底盘入口启用时把调用转到同一套 dm_ok
- * 驱动，不再维护第二份 DM 协议实现。
+ * 驱动，不再维护第二份 DM 协议实现
  */
 #define DM_LEGACY_MAX_COUNT 4u
 static DmMotorInstance s_legacy_instances[DM_LEGACY_MAX_COUNT];

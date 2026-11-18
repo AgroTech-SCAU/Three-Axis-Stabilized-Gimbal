@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-/* HighTorque Classic CAN v2.x protocol constants. */
+/* HighTorque Classic CAN v2.x protocol constants */
 #define HT_MOTOR_DEFAULT_TIMEOUT_MS       20u
 #define HT_MOTOR_REPLY_REQUEST_FLAG       0x8000u
 #define HT_MOTOR_TWO_PI                   6.28318530717958647692f
@@ -22,7 +22,7 @@
 #define HT_CAN_REPLY_I16_3                0x27u
 #define HT_CAN_REG_POSITION               0x01u
 
-/* Official HighTorque model torque correction coefficients. */
+/* Official HighTorque model torque correction coefficients */
 #define HT_4438_30_TORQUE_K  0.005256f
 #define HT_4438_30_TORQUE_D -0.050000f
 #define HT_5047_36_TORQUE_K  0.004938f
@@ -153,7 +153,7 @@ static const char* ht_motor_mode_str(BusMotorMode mode) {
     }
 }
 
-/* Classic CAN control commands directly enter control; no extra enable frame is needed. */
+/* Classic CAN control commands directly enter control; no extra enable frame is needed */
 static BusMotorStatus ht_motor_enable(uint16_t id) {
     HtMotorSlot* slot = ht_motor_get_slot(id);
     if(slot == NULL) {
@@ -454,7 +454,7 @@ static void ht_motor_reset_slot(HtMotorSlot* slot, uint16_t id) {
     slot->feedback.id = id;
 }
 
-/* HighTorque examples use 0x8000 | id so control/query frames use extended ID. */
+/* HighTorque examples use 0x8000 | id so control/query frames use extended ID */
 static uint32_t ht_motor_make_command_id(uint16_t id) {
     return HT_MOTOR_REPLY_REQUEST_FLAG | (uint32_t)(id & 0x7Fu);
 }
@@ -585,6 +585,6 @@ static float ht_motor_torque_from_raw(const HtMotorSlot* slot, int16_t raw) {
         return (float)raw * k + d;
     }
 
-    /* Unknown model: preserve a neutral generic scale rather than inventing a correction offset. */
+    /* Unknown model: preserve a neutral generic scale rather than inventing a correction offset */
     return (float)raw * 0.005f;
 }

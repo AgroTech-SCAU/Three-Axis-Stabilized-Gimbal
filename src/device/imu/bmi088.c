@@ -7,69 +7,69 @@
 
 // ! ========================= 变 量 声 明 ========================= ! //
 
-#define BMI088_TEMP_FACTOR                  0.125f
-#define BMI088_TEMP_OFFSET                  23.0f
+#define BMI088_TEMP_FACTOR 0.125f
+#define BMI088_TEMP_OFFSET 23.0f
 
-#define BMI088_WRITE_ACCEL_REG_NUM          6U
-#define BMI088_WRITE_GYRO_REG_NUM           6U
+#define BMI088_WRITE_ACCEL_REG_NUM 6U
+#define BMI088_WRITE_GYRO_REG_NUM 6U
 
-#define BMI088_LONG_DELAY_TIME              80U
-#define BMI088_COM_WAIT_SENSOR_TIME         150U
+#define BMI088_LONG_DELAY_TIME 80U
+#define BMI088_COM_WAIT_SENSOR_TIME 150U
 
-#define BMI088_ACCEL_3G_SEN                 0.0008974358974f
-#define BMI088_GYRO_2000_SEN                0.0010652644360316953f
+#define BMI088_ACCEL_3G_SEN 0.0008974358974f
+#define BMI088_GYRO_2000_SEN 0.0010652644360316953f
 
-#define BMI088_DMA_GYRO_FRAME_LEN           7U
-#define BMI088_DMA_ACCEL_FRAME_LEN          20U /* 0x12..0x23, including temperature */
-#define BMI088_SPI_DUMMY_BYTE               0x55U
-#define BMI088_TEMP_UPDATE_PERIOD_US        100000U
-#define BMI088_GYRO_STALE_TIMEOUT_US        10000U
-#define BMI088_ACCEL_STALE_TIMEOUT_US       10000U
-#define BMI088_ACCEL_NORM_MIN_MPS2          3.0f
-#define BMI088_ACCEL_NORM_MAX_MPS2          20.0f
+#define BMI088_DMA_GYRO_FRAME_LEN 7U
+#define BMI088_DMA_ACCEL_FRAME_LEN 20U /* 0x12..0x23, including temperature */
+#define BMI088_SPI_DUMMY_BYTE 0x55U
+#define BMI088_TEMP_UPDATE_PERIOD_US 100000U
+#define BMI088_GYRO_STALE_TIMEOUT_US 10000U
+#define BMI088_ACCEL_STALE_TIMEOUT_US 10000U
+#define BMI088_ACCEL_NORM_MIN_MPS2 3.0f
+#define BMI088_ACCEL_NORM_MAX_MPS2 20.0f
 
-#define BMI088_ACC_CHIP_ID                  0x00U
-#define BMI088_ACC_CHIP_ID_VALUE            0x1EU
-#define BMI088_ACCEL_XOUT_L                 0x12U
-#define BMI088_TEMP_M                       0x22U
-#define BMI088_ACC_CONF                     0x40U
-#define BMI088_ACC_CONF_MUST_SET            0x80U
-#define BMI088_ACC_NORMAL                   (0x2U << 4)
-#define BMI088_ACC_800_HZ                   (0xBU << 0)
-#define BMI088_ACC_RANGE                    0x41U
-#define BMI088_ACC_RANGE_3G                 (0x0U << 0)
-#define BMI088_INT1_IO_CTRL                 0x53U
-#define BMI088_ACC_INT1_IO_ENABLE           (0x1U << 3)
-#define BMI088_ACC_INT1_GPIO_PP             (0x0U << 2)
-#define BMI088_ACC_INT1_GPIO_HIGH           (0x1U << 1)
-#define BMI088_INT_MAP_DATA                 0x58U
-#define BMI088_ACC_INT1_DRDY_INTERRUPT      (0x1U << 2)
-#define BMI088_ACC_PWR_CONF                 0x7CU
-#define BMI088_ACC_PWR_ACTIVE_MODE          0x00U
-#define BMI088_ACC_PWR_CTRL                 0x7DU
-#define BMI088_ACC_ENABLE_ACC_ON            0x04U
-#define BMI088_ACC_SOFTRESET                0x7EU
-#define BMI088_ACC_SOFTRESET_VALUE          0xB6U
+#define BMI088_ACC_CHIP_ID 0x00U
+#define BMI088_ACC_CHIP_ID_VALUE 0x1EU
+#define BMI088_ACCEL_XOUT_L 0x12U
+#define BMI088_TEMP_M 0x22U
+#define BMI088_ACC_CONF 0x40U
+#define BMI088_ACC_CONF_MUST_SET 0x80U
+#define BMI088_ACC_NORMAL (0x2U << 4)
+#define BMI088_ACC_800_HZ (0xBU << 0)
+#define BMI088_ACC_RANGE 0x41U
+#define BMI088_ACC_RANGE_3G (0x0U << 0)
+#define BMI088_INT1_IO_CTRL 0x53U
+#define BMI088_ACC_INT1_IO_ENABLE (0x1U << 3)
+#define BMI088_ACC_INT1_GPIO_PP (0x0U << 2)
+#define BMI088_ACC_INT1_GPIO_HIGH (0x1U << 1)
+#define BMI088_INT_MAP_DATA 0x58U
+#define BMI088_ACC_INT1_DRDY_INTERRUPT (0x1U << 2)
+#define BMI088_ACC_PWR_CONF 0x7CU
+#define BMI088_ACC_PWR_ACTIVE_MODE 0x00U
+#define BMI088_ACC_PWR_CTRL 0x7DU
+#define BMI088_ACC_ENABLE_ACC_ON 0x04U
+#define BMI088_ACC_SOFTRESET 0x7EU
+#define BMI088_ACC_SOFTRESET_VALUE 0xB6U
 
-#define BMI088_GYRO_CHIP_ID                 0x00U
-#define BMI088_GYRO_CHIP_ID_VALUE           0x0FU
-#define BMI088_GYRO_X_L                     0x02U
-#define BMI088_GYRO_RANGE                   0x0FU
-#define BMI088_GYRO_2000                    (0x0U << 0)
-#define BMI088_GYRO_BANDWIDTH               0x10U
-#define BMI088_GYRO_BANDWIDTH_MUST_SET      0x80U
-#define BMI088_GYRO_1000_116_HZ             0x02U
-#define BMI088_GYRO_LPM1                    0x11U
-#define BMI088_GYRO_NORMAL_MODE             0x00U
-#define BMI088_GYRO_SOFTRESET               0x14U
-#define BMI088_GYRO_SOFTRESET_VALUE         0xB6U
-#define BMI088_GYRO_CTRL                    0x15U
-#define BMI088_DRDY_ON                      0x80U
-#define BMI088_GYRO_INT3_INT4_IO_CONF       0x16U
-#define BMI088_GYRO_INT3_GPIO_PP            (0x0U << 1)
-#define BMI088_GYRO_INT3_GPIO_HIGH          (0x1U << 0)
-#define BMI088_GYRO_INT3_INT4_IO_MAP        0x18U
-#define BMI088_GYRO_DRDY_IO_INT3            0x01U
+#define BMI088_GYRO_CHIP_ID 0x00U
+#define BMI088_GYRO_CHIP_ID_VALUE 0x0FU
+#define BMI088_GYRO_X_L 0x02U
+#define BMI088_GYRO_RANGE 0x0FU
+#define BMI088_GYRO_2000 (0x0U << 0)
+#define BMI088_GYRO_BANDWIDTH 0x10U
+#define BMI088_GYRO_BANDWIDTH_MUST_SET 0x80U
+#define BMI088_GYRO_1000_116_HZ 0x02U
+#define BMI088_GYRO_LPM1 0x11U
+#define BMI088_GYRO_NORMAL_MODE 0x00U
+#define BMI088_GYRO_SOFTRESET 0x14U
+#define BMI088_GYRO_SOFTRESET_VALUE 0xB6U
+#define BMI088_GYRO_CTRL 0x15U
+#define BMI088_DRDY_ON 0x80U
+#define BMI088_GYRO_INT3_INT4_IO_CONF 0x16U
+#define BMI088_GYRO_INT3_GPIO_PP (0x0U << 1)
+#define BMI088_GYRO_INT3_GPIO_HIGH (0x1U << 0)
+#define BMI088_GYRO_INT3_INT4_IO_MAP 0x18U
+#define BMI088_GYRO_DRDY_IO_INT3 0x01U
 
 typedef enum {
     BMI088_DMA_IDLE = 0,
@@ -139,7 +139,6 @@ static bool bmi088_start_gyro_dma(void);
 static bool bmi088_start_accel_dma(void);
 static void bmi088_parse_gyro_dma_buffer(void);
 static void bmi088_parse_accel_dma_buffer(void);
-static void bmi088_copy_vector3(float dst[3], const float src[3]);
 static void bmi088_dma_prepare_txrx(uint16_t len);
 static void bmi088_dma_maintain_before_start(uint16_t len);
 static void bmi088_dma_maintain_after_finish(uint16_t len);
@@ -169,21 +168,21 @@ static float s_bmi088_gyro_dma[3];
 static float s_bmi088_accel_dma[3];
 
 static const uint8_t s_bmi088_accel_reg_init[BMI088_WRITE_ACCEL_REG_NUM][3] = {
-    {BMI088_ACC_PWR_CTRL, BMI088_ACC_ENABLE_ACC_ON, BMI088_ERROR_ACC_PWR_CTRL},
-    {BMI088_ACC_PWR_CONF, BMI088_ACC_PWR_ACTIVE_MODE, BMI088_ERROR_ACC_PWR_CONF},
-    {BMI088_ACC_CONF, BMI088_ACC_NORMAL | BMI088_ACC_800_HZ | BMI088_ACC_CONF_MUST_SET, BMI088_ERROR_ACC_CONF},
-    {BMI088_ACC_RANGE, BMI088_ACC_RANGE_3G, BMI088_ERROR_ACC_RANGE},
-    {BMI088_INT1_IO_CTRL, BMI088_ACC_INT1_IO_ENABLE | BMI088_ACC_INT1_GPIO_PP | BMI088_ACC_INT1_GPIO_HIGH, BMI088_ERROR_INT1_IO_CTRL},
-    {BMI088_INT_MAP_DATA, BMI088_ACC_INT1_DRDY_INTERRUPT, BMI088_ERROR_INT_MAP_DATA}
+    { BMI088_ACC_PWR_CTRL, BMI088_ACC_ENABLE_ACC_ON, BMI088_ERROR_ACC_PWR_CTRL },
+    { BMI088_ACC_PWR_CONF, BMI088_ACC_PWR_ACTIVE_MODE, BMI088_ERROR_ACC_PWR_CONF },
+    { BMI088_ACC_CONF, BMI088_ACC_NORMAL | BMI088_ACC_800_HZ | BMI088_ACC_CONF_MUST_SET, BMI088_ERROR_ACC_CONF },
+    { BMI088_ACC_RANGE, BMI088_ACC_RANGE_3G, BMI088_ERROR_ACC_RANGE },
+    { BMI088_INT1_IO_CTRL, BMI088_ACC_INT1_IO_ENABLE | BMI088_ACC_INT1_GPIO_PP | BMI088_ACC_INT1_GPIO_HIGH, BMI088_ERROR_INT1_IO_CTRL },
+    { BMI088_INT_MAP_DATA, BMI088_ACC_INT1_DRDY_INTERRUPT, BMI088_ERROR_INT_MAP_DATA }
 };
 
 static const uint8_t s_bmi088_gyro_reg_init[BMI088_WRITE_GYRO_REG_NUM][3] = {
-    {BMI088_GYRO_RANGE, BMI088_GYRO_2000, BMI088_ERROR_GYRO_RANGE},
-    {BMI088_GYRO_BANDWIDTH, BMI088_GYRO_1000_116_HZ | BMI088_GYRO_BANDWIDTH_MUST_SET, BMI088_ERROR_GYRO_BANDWIDTH},
-    {BMI088_GYRO_LPM1, BMI088_GYRO_NORMAL_MODE, BMI088_ERROR_GYRO_LPM1},
-    {BMI088_GYRO_CTRL, BMI088_DRDY_ON, BMI088_ERROR_GYRO_CTRL},
-    {BMI088_GYRO_INT3_INT4_IO_CONF, BMI088_GYRO_INT3_GPIO_PP | BMI088_GYRO_INT3_GPIO_HIGH, BMI088_ERROR_GYRO_INT3_INT4_IO_CONF},
-    {BMI088_GYRO_INT3_INT4_IO_MAP, BMI088_GYRO_DRDY_IO_INT3, BMI088_ERROR_GYRO_INT3_INT4_IO_MAP}
+    { BMI088_GYRO_RANGE, BMI088_GYRO_2000, BMI088_ERROR_GYRO_RANGE },
+    { BMI088_GYRO_BANDWIDTH, BMI088_GYRO_1000_116_HZ | BMI088_GYRO_BANDWIDTH_MUST_SET, BMI088_ERROR_GYRO_BANDWIDTH },
+    { BMI088_GYRO_LPM1, BMI088_GYRO_NORMAL_MODE, BMI088_ERROR_GYRO_LPM1 },
+    { BMI088_GYRO_CTRL, BMI088_DRDY_ON, BMI088_ERROR_GYRO_CTRL },
+    { BMI088_GYRO_INT3_INT4_IO_CONF, BMI088_GYRO_INT3_GPIO_PP | BMI088_GYRO_INT3_GPIO_HIGH, BMI088_ERROR_GYRO_INT3_INT4_IO_CONF },
+    { BMI088_GYRO_INT3_INT4_IO_MAP, BMI088_GYRO_DRDY_IO_INT3, BMI088_ERROR_GYRO_INT3_INT4_IO_MAP }
 };
 
 static ImuAcc s_bmi088_acc = { 0.0f, 0.0f, 0.0f };
@@ -200,7 +199,10 @@ static volatile Bmi088AsyncNext s_bmi088_async_next = BMI088_ASYNC_NEXT_GYRO;
 
 
 #define BMI088_QUEUE_SIZE 16U
-typedef struct { ImuSample sample; uint32_t sequence; } Bmi088QueuedSample;
+typedef struct {
+    ImuSample sample;
+    uint32_t sequence;
+} Bmi088QueuedSample;
 static Bmi088QueuedSample s_queue[BMI088_QUEUE_SIZE];
 static uint32_t s_queue_head, s_queue_tail, s_queue_count;
 static Bmi088AsyncStats s_stats;
@@ -212,19 +214,23 @@ static bool s_accel_valid;
 static float s_temp_dma;
 static Bmi088Snapshot s_snapshot;
 static bool s_snapshot_valid;
-static uint32_t bmi088_lock(void) { return s_bmi088_ops->critical_enter(); }
-static void bmi088_unlock(uint32_t key) { s_bmi088_ops->critical_exit(key); }
+static uint32_t bmi088_lock(void) {
+    return s_bmi088_ops->critical_enter();
+}
+static void bmi088_unlock(uint32_t key) {
+    s_bmi088_ops->critical_exit(key);
+}
 
-/* Called only while the short acquisition critical section is held. */
+/* 调用方须持有采集短临界区 */
 static void bmi088_publish_gyro(void) {
-    Bmi088QueuedSample *slot;
+    Bmi088QueuedSample* slot;
     if(s_queue_count == BMI088_QUEUE_SIZE) {
         s_queue_tail = (s_queue_tail + 1U) % BMI088_QUEUE_SIZE;
         --s_queue_count;
         ++s_stats.queue_overruns;
     }
     slot = &s_queue[s_queue_head];
-    slot->sample = (ImuSample){0};
+    slot->sample = (ImuSample){ 0 };
     slot->sample.gyro = bmi088_make_gyro(s_bmi088_gyro_dma);
     slot->sample.gyro_timestamp_us = s_transfer_us;
     slot->sample.flags = IMU_SAMPLE_GYRO_NEW | IMU_SAMPLE_GYRO_VALID;
@@ -240,17 +246,19 @@ static void bmi088_publish_gyro(void) {
     ++s_queue_count;
 }
 
-bool bmi088_get_snapshot(Bmi088Snapshot *snapshot) {
-    /* Main-loop-only API: neither DMA nor ISR writes this object. */
-    if(snapshot == NULL || !s_snapshot_valid) return false;
+bool bmi088_get_snapshot(Bmi088Snapshot* snapshot) {
+    /* 仅主循环访问，DMA/ISR 不写此快照 */
+    if(snapshot == NULL || !s_snapshot_valid)
+        return false;
     *snapshot = s_snapshot;
     return true;
 }
 
-bool bmi088_get_async_stats(Bmi088AsyncStats *stats) {
+bool bmi088_get_async_stats(Bmi088AsyncStats* stats) {
     uint32_t key;
     if(stats == NULL || s_bmi088_ops == NULL ||
-       s_bmi088_ops->critical_enter == NULL) return false;
+       s_bmi088_ops->critical_enter == NULL)
+        return false;
     key = bmi088_lock();
     *stats = s_stats;
     stats->queue_depth = s_queue_count;
@@ -299,30 +307,7 @@ ImuStatus bmi088_make_config(Bmi088Config* config, const Bmi088PortOps* ops, con
     config->gyro_sen = BMI088_GYRO_2000_SEN;
     config->accel_int_pin = accel_int_pin;
     config->gyro_int_pin = gyro_int_pin;
-    config->attitude.mode = IMU_ATTITUDE_MAHONY_6AXIS;
-    config->attitude.gyro_calib_samples = 2000U;
-    config->attitude.acc_norm = 9.80665f;
-    config->attitude.acc_norm_tolerance = 1.5f;
-    config->attitude.max_acc_age_us = 20000U;
-    config->attitude.gyro_calib_var_threshold = 0.01f;
-    config->attitude.complementary_tau = 0.5f;
-    config->attitude.mahony_kp = 2.0f;
-    config->attitude.mahony_ki = 0.0f;
-    config->attitude.mahony_ki_z = 0.0f;
-    config->attitude.gyro_x_temp_coeff = 0.0f;
-    config->attitude.gyro_y_temp_coeff = 0.0f;
-
-    /**
-     * 基于冷启动到约 33 C 升温日志的固定拟合：
-     * bias_eff_z = gyro_z_bias_offset + gyro_z_temp_coeff * temp
-     */
-    config->attitude.gyro_z_temp_coeff = 0.000038f;
-    config->attitude.gyro_z_bias_offset = 0.00090f;
-    config->attitude.gyro_z_bias_temp_coeff = 0.0f;
-
-    config->attitude.zru_gyro_threshold = 0.0f;
-    config->attitude.zru_min_static_us = 0U;
-    config->attitude.zru_bias_gain = 0.0f;
+    config->attitude = imu_attitude_default_config();
 
     return IMU_STATUS_OK;
 }
@@ -334,24 +319,42 @@ ImuStatus bmi088_make_config(Bmi088Config* config, const Bmi088PortOps* ops, con
  */
 const char* bmi088_error_str(Bmi088Error error) {
     switch(error) {
-        case BMI088_ERROR_NO_ERROR: return "NO_ERROR";
-        case BMI088_ERROR_ACC_PWR_CTRL: return "ACC_PWR_CTRL_ERROR";
-        case BMI088_ERROR_ACC_PWR_CONF: return "ACC_PWR_CONF_ERROR";
-        case BMI088_ERROR_ACC_CONF: return "ACC_CONF_ERROR";
-        case BMI088_ERROR_ACC_SELF_TEST: return "ACC_SELF_TEST_ERROR";
-        case BMI088_ERROR_ACC_RANGE: return "ACC_RANGE_ERROR";
-        case BMI088_ERROR_INT1_IO_CTRL: return "INT1_IO_CTRL_ERROR";
-        case BMI088_ERROR_INT_MAP_DATA: return "INT_MAP_DATA_ERROR";
-        case BMI088_ERROR_GYRO_RANGE: return "GYRO_RANGE_ERROR";
-        case BMI088_ERROR_GYRO_BANDWIDTH: return "GYRO_BANDWIDTH_ERROR";
-        case BMI088_ERROR_GYRO_LPM1: return "GYRO_LPM1_ERROR";
-        case BMI088_ERROR_GYRO_CTRL: return "GYRO_CTRL_ERROR";
-        case BMI088_ERROR_GYRO_INT3_INT4_IO_CONF: return "GYRO_INT3_INT4_IO_CONF_ERROR";
-        case BMI088_ERROR_GYRO_INT3_INT4_IO_MAP: return "GYRO_INT3_INT4_IO_MAP_ERROR";
-        case BMI088_ERROR_SELF_TEST_ACCEL: return "SELF_TEST_ACCEL_ERROR";
-        case BMI088_ERROR_SELF_TEST_GYRO: return "SELF_TEST_GYRO_ERROR";
-        case BMI088_ERROR_NO_SENSOR: return "NO_SENSOR";
-        default: return "UNKNOWN";
+        case BMI088_ERROR_NO_ERROR:
+            return "NO_ERROR";
+        case BMI088_ERROR_ACC_PWR_CTRL:
+            return "ACC_PWR_CTRL_ERROR";
+        case BMI088_ERROR_ACC_PWR_CONF:
+            return "ACC_PWR_CONF_ERROR";
+        case BMI088_ERROR_ACC_CONF:
+            return "ACC_CONF_ERROR";
+        case BMI088_ERROR_ACC_SELF_TEST:
+            return "ACC_SELF_TEST_ERROR";
+        case BMI088_ERROR_ACC_RANGE:
+            return "ACC_RANGE_ERROR";
+        case BMI088_ERROR_INT1_IO_CTRL:
+            return "INT1_IO_CTRL_ERROR";
+        case BMI088_ERROR_INT_MAP_DATA:
+            return "INT_MAP_DATA_ERROR";
+        case BMI088_ERROR_GYRO_RANGE:
+            return "GYRO_RANGE_ERROR";
+        case BMI088_ERROR_GYRO_BANDWIDTH:
+            return "GYRO_BANDWIDTH_ERROR";
+        case BMI088_ERROR_GYRO_LPM1:
+            return "GYRO_LPM1_ERROR";
+        case BMI088_ERROR_GYRO_CTRL:
+            return "GYRO_CTRL_ERROR";
+        case BMI088_ERROR_GYRO_INT3_INT4_IO_CONF:
+            return "GYRO_INT3_INT4_IO_CONF_ERROR";
+        case BMI088_ERROR_GYRO_INT3_INT4_IO_MAP:
+            return "GYRO_INT3_INT4_IO_MAP_ERROR";
+        case BMI088_ERROR_SELF_TEST_ACCEL:
+            return "SELF_TEST_ACCEL_ERROR";
+        case BMI088_ERROR_SELF_TEST_GYRO:
+            return "SELF_TEST_GYRO_ERROR";
+        case BMI088_ERROR_NO_SENSOR:
+            return "NO_SENSOR";
+        default:
+            return "UNKNOWN";
     }
 }
 
@@ -435,7 +438,8 @@ bool bmi088_is_zru_enabled(void) {
  * @brief BMI088 EXTI 回调转发
  */
 void bmi088_exti_callback(uint16_t gpio_pin) {
-    if(!s_async_enabled || !s_bmi088_is_initialized || s_async_fault) return;
+    if(!s_async_enabled || !s_bmi088_is_initialized || s_async_fault)
+        return;
     if(gpio_pin == s_bmi088_gyro_int_pin) {
         bmi088_notify_gyro_data_ready();
     }
@@ -516,12 +520,19 @@ static ImuStatus bmi088_init_common(const void* config, bool require_async_ops) 
 static ImuStatus bmi088_update(void) {
     Bmi088QueuedSample local;
     uint32_t key;
-    if(!s_bmi088_is_initialized) return IMU_STATUS_NOT_INITIALIZE;
+    if(!s_bmi088_is_initialized)
+        return IMU_STATUS_NOT_INITIALIZE;
     key = bmi088_lock();
-    if(s_async_fault) { bmi088_unlock(key); return IMU_STATUS_ERROR; }
+    if(s_async_fault) {
+        bmi088_unlock(key);
+        return IMU_STATUS_ERROR;
+    }
     (void)bmi088_async_poll();
-    if(s_queue_count == 0U) { bmi088_unlock(key); return IMU_STATUS_NOT_READY; }
-    /* DMA writes only its own aligned buffer; this queue is CPU-owned. */
+    if(s_queue_count == 0U) {
+        bmi088_unlock(key);
+        return IMU_STATUS_NOT_READY;
+    }
+    /* DMA 只写专用对齐缓冲，队列由 CPU 管理 */
     local = s_queue[s_queue_tail];
     s_queue_tail = (s_queue_tail + 1U) % BMI088_QUEUE_SIZE;
     --s_queue_count;
@@ -529,11 +540,12 @@ static ImuStatus bmi088_update(void) {
     bmi088_unlock(key);
 
     if(local.sample.flags & IMU_SAMPLE_ACC_VALID) {
-        float acc[3] = {local.sample.acc.x, local.sample.acc.y, local.sample.acc.z};
+        float acc[3] = { local.sample.acc.x, local.sample.acc.y, local.sample.acc.z };
         if(!bmi088_acc_sample_is_reasonable(acc)) {
             local.sample.flags &= ~IMU_SAMPLE_ACC_VALID;
-        } else if(!(s_bmi088_sample.flags & IMU_SAMPLE_ACC_VALID) ||
-                  local.sample.acc_timestamp_us != s_bmi088_sample.acc_timestamp_us) {
+        }
+        else if(!(s_bmi088_sample.flags & IMU_SAMPLE_ACC_VALID) ||
+                local.sample.acc_timestamp_us != s_bmi088_sample.acc_timestamp_us) {
             local.sample.flags |= IMU_SAMPLE_ACC_NEW;
         }
         if(!(s_bmi088_sample.flags & IMU_SAMPLE_TEMP_VALID) ||
@@ -544,7 +556,7 @@ static ImuStatus bmi088_update(void) {
     s_bmi088_gyro = local.sample.gyro;
     s_bmi088_acc = local.sample.acc;
     s_bmi088_temp = local.sample.temperature;
-    bmi088_attitude_update(); /* Main context only. */
+    bmi088_attitude_update(); /* Main context only */
     s_snapshot.sample = local.sample;
     s_snapshot.angle = s_bmi088_angle;
     s_snapshot.gyro_corrected = bmi088_get_gyro_corrected();
@@ -575,7 +587,7 @@ static ImuStatus bmi088_blocking_update(void) {
     now_us = bmi088_now_us();
     s_bmi088_sample.gyro_timestamp_us = now_us;
     s_bmi088_sample.flags = IMU_SAMPLE_GYRO_NEW | IMU_SAMPLE_GYRO_VALID |
-        (s_bmi088_sample.flags & IMU_SAMPLE_TEMP_VALID);
+                            (s_bmi088_sample.flags & IMU_SAMPLE_TEMP_VALID);
     if(bmi088_acc_sample_is_reasonable(raw_acc)) {
         s_bmi088_acc = bmi088_make_acc(raw_acc);
         s_bmi088_sample.acc = s_bmi088_acc;
@@ -642,7 +654,7 @@ static ImuStatus bmi088_get_sample(ImuSample* sample) {
     }
 
     new_flags = s_bmi088_sample.flags &
-        (IMU_SAMPLE_ACC_NEW | IMU_SAMPLE_GYRO_NEW | IMU_SAMPLE_TEMP_NEW);
+                (IMU_SAMPLE_ACC_NEW | IMU_SAMPLE_GYRO_NEW | IMU_SAMPLE_TEMP_NEW);
     if(new_flags == IMU_SAMPLE_NONE) {
         return IMU_STATUS_NOT_READY;
     }
@@ -657,14 +669,22 @@ static ImuStatus bmi088_get_sample(ImuSample* sample) {
  */
 static const char* bmi088_status_str(ImuStatus status) {
     switch(status) {
-        case IMU_STATUS_OK: return "OK";
-        case IMU_STATUS_ERROR: return "ERROR";
-        case IMU_STATUS_INVALID_PARAM: return "INVALID_PARAM";
-        case IMU_STATUS_NO_INSTANCE: return "NO_INSTANCE";
-        case IMU_STATUS_NOT_INITIALIZE: return "NOT_INITIALIZE";
-        case IMU_STATUS_NOT_READY: return "NOT_READY";
-        case IMU_STATUS_UNSUPPORTED: return "UNSUPPORTED";
-        default: return "UNKNOWN";
+        case IMU_STATUS_OK:
+            return "OK";
+        case IMU_STATUS_ERROR:
+            return "ERROR";
+        case IMU_STATUS_INVALID_PARAM:
+            return "INVALID_PARAM";
+        case IMU_STATUS_NO_INSTANCE:
+            return "NO_INSTANCE";
+        case IMU_STATUS_NOT_INITIALIZE:
+            return "NOT_INITIALIZE";
+        case IMU_STATUS_NOT_READY:
+            return "NOT_READY";
+        case IMU_STATUS_UNSUPPORTED:
+            return "UNSUPPORTED";
+        default:
+            return "UNKNOWN";
     }
 }
 
@@ -847,8 +867,8 @@ static void bmi088_async_init(void) {
     s_async_fault = false;
     s_queue_head = s_queue_tail = s_queue_count = 0U;
     s_accel_valid = s_snapshot_valid = false;
-    s_stats = (Bmi088AsyncStats){0};
-    s_snapshot = (Bmi088Snapshot){0};
+    s_stats = (Bmi088AsyncStats){ 0 };
+    s_snapshot = (Bmi088Snapshot){ 0 };
     memset(s_bmi088_tx, 0, sizeof(s_bmi088_tx));
     memset(s_bmi088_rx, 0, sizeof(s_bmi088_rx));
     memset(s_bmi088_gyro_dma, 0, sizeof(s_bmi088_gyro_dma));
@@ -863,7 +883,8 @@ static void bmi088_async_init(void) {
 static void bmi088_notify_gyro_data_ready(void) {
     uint32_t key = bmi088_lock();
     ++s_stats.gyro_drdy;
-    if(s_bmi088_gyro_pending) ++s_stats.gyro_coalesced;
+    if(s_bmi088_gyro_pending)
+        ++s_stats.gyro_coalesced;
     s_gyro_pending_us = bmi088_now_us();
     s_bmi088_gyro_pending = true;
     (void)bmi088_async_poll();
@@ -877,7 +898,8 @@ static void bmi088_notify_gyro_data_ready(void) {
 static void bmi088_notify_accel_data_ready(void) {
     uint32_t key = bmi088_lock();
     ++s_stats.accel_drdy;
-    if(s_bmi088_accel_pending) ++s_stats.accel_coalesced;
+    if(s_bmi088_accel_pending)
+        ++s_stats.accel_coalesced;
     s_accel_pending_us = bmi088_now_us();
     s_bmi088_accel_pending = true;
     (void)bmi088_async_poll();
@@ -890,25 +912,32 @@ static void bmi088_notify_accel_data_ready(void) {
  */
 static bool bmi088_async_poll(void) {
     bool gyro, started;
-    /* Caller holds critical section. No synthetic DRDY or blocking SPI. */
+    /* 调用方持有临界区，仅处理真实 DRDY，不使用阻塞 SPI */
     if(!s_async_enabled || s_async_fault || s_bmi088_dma_state != BMI088_DMA_IDLE)
         return false;
-    if(!s_bmi088_gyro_pending && !s_bmi088_accel_pending) return false;
+    if(!s_bmi088_gyro_pending && !s_bmi088_accel_pending)
+        return false;
     gyro = s_bmi088_gyro_pending &&
-        (!s_bmi088_accel_pending || s_bmi088_async_next == BMI088_ASYNC_NEXT_GYRO);
+           (!s_bmi088_accel_pending || s_bmi088_async_next == BMI088_ASYNC_NEXT_GYRO);
     s_transfer_us = gyro ? s_gyro_pending_us : s_accel_pending_us;
     if(gyro) {
         s_bmi088_gyro_pending = false;
         started = bmi088_start_gyro_dma();
-        if(!started) s_bmi088_gyro_pending = true;
-        else s_bmi088_async_next = BMI088_ASYNC_NEXT_ACCEL;
-    } else {
+        if(!started)
+            s_bmi088_gyro_pending = true;
+        else
+            s_bmi088_async_next = BMI088_ASYNC_NEXT_ACCEL;
+    }
+    else {
         s_bmi088_accel_pending = false;
         started = bmi088_start_accel_dma();
-        if(!started) s_bmi088_accel_pending = true;
-        else s_bmi088_async_next = BMI088_ASYNC_NEXT_GYRO;
+        if(!started)
+            s_bmi088_accel_pending = true;
+        else
+            s_bmi088_async_next = BMI088_ASYNC_NEXT_GYRO;
     }
-    if(!started) ++s_stats.dma_start_failures;
+    if(!started)
+        ++s_stats.dma_start_failures;
     return started;
 }
 
@@ -931,20 +960,23 @@ static bool bmi088_async_poll(void) {
 static void bmi088_spi_txrx_complete(void* spi_handle) {
     uint32_t key;
     if(!s_async_enabled || s_async_fault || s_bmi088_ops == NULL ||
-       spi_handle != bmi088_get_spi_handle()) return;
+       spi_handle != bmi088_get_spi_handle())
+        return;
     key = bmi088_lock();
     if(s_bmi088_dma_state == BMI088_DMA_GYRO) {
         bmi088_gyro_cs_high();
         bmi088_dma_maintain_after_finish(BMI088_DMA_GYRO_FRAME_LEN);
         bmi088_parse_gyro_dma_buffer();
         bmi088_publish_gyro();
-    } else if(s_bmi088_dma_state == BMI088_DMA_ACCEL) {
+    }
+    else if(s_bmi088_dma_state == BMI088_DMA_ACCEL) {
         int16_t temp;
         bmi088_accel_cs_high();
         bmi088_dma_maintain_after_finish(BMI088_DMA_ACCEL_FRAME_LEN);
         bmi088_parse_accel_dma_buffer();
         temp = (int16_t)((s_bmi088_rx[18] << 3) | (s_bmi088_rx[19] >> 5));
-        if(temp > 1023) temp -= 2048;
+        if(temp > 1023)
+            temp -= 2048;
         s_temp_dma = temp * BMI088_TEMP_FACTOR + BMI088_TEMP_OFFSET;
         s_accel_completed_us = s_transfer_us;
         s_accel_valid = true;
@@ -962,10 +994,11 @@ static void bmi088_spi_txrx_complete(void* spi_handle) {
 static void bmi088_spi_error(void* spi_handle) {
     uint32_t key;
     if(!s_async_enabled || s_bmi088_ops == NULL ||
-       spi_handle != bmi088_get_spi_handle()) return;
+       spi_handle != bmi088_get_spi_handle())
+        return;
     key = bmi088_lock();
     ++s_stats.dma_errors;
-    s_async_fault = true; /* Stop until explicit reinitialization/reboot. */
+    s_async_fault = true; /* Stop until explicit reinitialization/reboot */
     s_queue_count = 0U;
     bmi088_release_all_cs();
     bmi088_unlock(key);
@@ -993,15 +1026,15 @@ static bool bmi088_config_is_valid(const Bmi088Config* config, bool require_asyn
 
     ops = config->ops;
     if(ops->accel_cs_low == 0 || ops->accel_cs_high == 0 ||
-        ops->gyro_cs_low == 0 || ops->gyro_cs_high == 0 ||
-        ops->read_write_byte == 0 || ops->now_ms == 0 ||
-        ops->now_us == 0 || ops->delay_ms == 0 || ops->delay_us == 0) {
+       ops->gyro_cs_low == 0 || ops->gyro_cs_high == 0 ||
+       ops->read_write_byte == 0 || ops->now_ms == 0 ||
+       ops->now_us == 0 || ops->delay_ms == 0 || ops->delay_us == 0) {
         return false;
     }
 
     if(require_async_ops &&
-        (ops->transmit_receive_dma == 0 || ops->get_spi_handle == 0 ||
-         ops->critical_enter == 0 || ops->critical_exit == 0)) {
+       (ops->transmit_receive_dma == 0 || ops->get_spi_handle == 0 ||
+        ops->critical_enter == 0 || ops->critical_exit == 0)) {
         return false;
     }
 
@@ -1035,7 +1068,7 @@ static void bmi088_attitude_update(void) {
 
     status = imu_attitude_update(&s_bmi088_attitude, &s_bmi088_sample);
     if(status == IMU_ATTITUDE_STATUS_OK ||
-        (status == IMU_ATTITUDE_STATUS_CALIBRATING && s_bmi088_attitude.has_angle != 0U)) {
+       (status == IMU_ATTITUDE_STATUS_CALIBRATING && s_bmi088_attitude.has_angle != 0U)) {
         (void)imu_attitude_get_angle(&s_bmi088_attitude, &s_bmi088_angle);
     }
 }
@@ -1049,7 +1082,7 @@ static void bmi088_gpio_init(void) {
 /**
  * @brief 初始化 BMI088 通信接口
  */
-static void bmi088_com_init(void) {}
+static void bmi088_com_init(void) { }
 
 /**
  * @brief 毫秒级阻塞延时
@@ -1276,15 +1309,6 @@ static void bmi088_parse_accel_dma_buffer(void) {
 }
 
 /**
- * @brief 拷贝三轴数据
- */
-static void bmi088_copy_vector3(float dst[3], const float src[3]) {
-    dst[0] = src[0];
-    dst[1] = src[1];
-    dst[2] = src[2];
-}
-
-/**
  * @brief 准备 DMA 收发缓冲区
  */
 static void bmi088_dma_prepare_txrx(uint16_t len) {
@@ -1327,7 +1351,7 @@ static void bmi088_update_temp_cache(uint32_t now_us, uint8_t* sample_flags) {
     }
 
     if(s_bmi088_sample.temp_timestamp_us != 0U &&
-        (now_us - s_bmi088_sample.temp_timestamp_us) < BMI088_TEMP_UPDATE_PERIOD_US) {
+       (now_us - s_bmi088_sample.temp_timestamp_us) < BMI088_TEMP_UPDATE_PERIOD_US) {
         return;
     }
 
@@ -1365,7 +1389,7 @@ static bool bmi088_acc_sample_is_reasonable(const float acc[3]) {
     const float norm = bmi088_acc_norm(acc);
 
     return norm >= BMI088_ACCEL_NORM_MIN_MPS2 &&
-        norm <= BMI088_ACCEL_NORM_MAX_MPS2;
+           norm <= BMI088_ACCEL_NORM_MAX_MPS2;
 }
 
 /**
@@ -1399,4 +1423,3 @@ static ImuGyro bmi088_make_gyro(const float gyro[3]) {
     result.z = gyro[2];
     return result;
 }
-

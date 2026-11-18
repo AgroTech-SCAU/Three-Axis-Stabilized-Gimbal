@@ -145,7 +145,7 @@ SystemStatus assemble_ht_motor(void) {
     /*
      * Safe-stop is deliberately deferred to the runtime loop. This gives the
      * motor power rail/transceivers the remaining boot-settle time and avoids
-     * entering Bus-Off before the recovery service is running.
+     * entering Bus-Off before the recovery service is running
      */
     log_info("HT safe stop deferred to runtime; waiting for encoder feedback");
 
@@ -190,11 +190,11 @@ void assemble_ht_motor_process(void) {
         }
 
         /*
-         * Never hammer an unready CAN bus at the normal 20 ms feedback rate.
+         * Never hammer an unready CAN bus at the normal 20 ms feedback rate
          * Before the first valid reply (or after feedback goes stale), send a
          * single discovery query only every 250 ms.  This gives motor power
          * rails/transceivers time to boot and prevents application-level retry
-         * traffic from driving TEC to Bus-Off when no node is ready to ACK.
+         * traffic from driving TEC to Bus-Off when no node is ready to ACK
          */
         if(!fresh) {
             if(can_tx_ready(&hfdcan1) &&
@@ -213,7 +213,7 @@ void assemble_ht_motor_process(void) {
                                  s_ht_motor_ids[i]);
                     }
 
-                    /* Exponential backoff while the node is still silent. */
+                    /* Exponential backoff while the node is still silent */
                     next_period = s_discovery_period_ms[i] << 1u;
                     if(next_period > HT_DISCOVERY_MAX_PERIOD_MS ||
                        next_period < s_discovery_period_ms[i]) {
@@ -225,14 +225,14 @@ void assemble_ht_motor_process(void) {
             continue;
         }
 
-        /* Only command stop after the node has proved it is alive. */
+        /* Only command stop after the node has proved it is alive */
         if(can_tx_ready(&hfdcan1) && !s_stop_command_sent[i]) {
             status = ht_motor_instance.stop(s_ht_motor_ids[i]);
             if(status != MOTOR_STATUS_OK) {
                 ht_log_can_diagnostic("safe stop", s_ht_motor_ids[i], status, now);
                 continue;
             }
-            /* Enqueue success is not a stop acknowledgement. Require a later reply. */
+            /* Enqueue success is not a stop acknowledgement. Require a later reply */
             s_stop_feedback_sequence[i] = s_feedback_sequence[i];
             s_stop_command_sent[i] = true;
             s_last_feedback_request_ms[i] = now;
@@ -535,7 +535,7 @@ static uint8_t ht_motor_rx_length(uint32_t data_length) {
         case FDCAN_DLC_BYTES_7: return 7u;
         case FDCAN_DLC_BYTES_8: return 8u;
         default:
-            /* Some HAL versions expose the raw DLC nibble instead of encoded macros. */
+            /* Some HAL versions expose the raw DLC nibble instead of encoded macros */
             return data_length <= 8u ? (uint8_t)data_length : 0u;
     }
 }
@@ -564,7 +564,7 @@ static float ht_motor_nearest_absolute_target(float current_position,
     return current_position + delta;
 }
 
-/* Read-only coherent snapshot; return false for absent/stale feedback. */
+/* Read-only coherent snapshot; return false for absent/stale feedback */
 bool assemble_ht_motor_get_feedback_snapshot(uint16_t id, BusMotorFeedback* feedback) {
     uint8_t idx = ht_motor_index_by_id(id);
     if(idx >= HT_TEST_MOTOR_COUNT || feedback == NULL) return false;
@@ -603,7 +603,7 @@ void assemble_ht_motor_cancel_control(uint16_t id) {
     if(i>=HT_TEST_MOTOR_COUNT || !s_control_active[i] || !can_tx_ready(&hfdcan1)) return;
     if((uint32_t)(now-s_cancel_attempt_ms[i])<HT_TARGET_TX_PERIOD_MS) return;
     s_cancel_attempt_ms[i]=now;
-    /* Best-effort hold at latest measured position. Cannot stop a disconnected motor. */
+    /* Best-effort hold at latest measured position. Cannot stop a disconnected motor */
     float q; uint32_t key=__get_PRIMASK(); __disable_irq(); q=s_raw_position[i]; __set_PRIMASK(key);
     if(isfinite(q) && ht_motor_instance.set_pos_vel(id,q,s_control_speed[i])==MOTOR_STATUS_OK)
         s_control_active[i]=false;
