@@ -149,12 +149,12 @@ BspCanStatus can_start(FDCAN_HandleTypeDef* hcan) {
      * FDCAN1 carries continuously refreshed motor-control commands. Replaying a
      * stale command indefinitely after an ACK/physical-layer fault is unsafe,
      * and a single unacknowledged frame with hardware auto-retransmit enabled
-     * can drive TEC to Bus-Off before the application gets CPU time.
+     * can drive TEC to Bus-Off before the application gets CPU time
      *
      * Disable automatic retransmission on the shared motor bus. DM/HT already
      * implement software retries/periodic setpoints, so the next fresh command
      * supersedes a dropped frame. Keep hfdcan1.Init in sync with the register so
-     * diagnostics/regeneration do not disagree about the active policy.
+     * diagnostics/regeneration do not disagree about the active policy
      */
     if(hcan->Instance == FDCAN1) {
         hcan->Init.AutoRetransmission = DISABLE;
@@ -256,7 +256,7 @@ static BspCanStatus can_send_with_format(FDCAN_HandleTypeDef* hcan,
      * configured in FD+BRS mode for other devices on the same bus.  DMG6220
      * V4 control frames are classic CAN frames, so CLASSIC+BRS_ON is invalid
      * and can make disable/mode/enable appear to be sent while the motor never
-     * receives them.
+     * receives them
      */
     if(fd_format == FDCAN_CLASSIC_CAN) {
         tx_header.BitRateSwitch = FDCAN_BRS_OFF;
@@ -272,9 +272,9 @@ static BspCanStatus can_send_with_format(FDCAN_HandleTypeDef* hcan,
 
     if(HAL_FDCAN_GetTxFifoFreeLevel(hcan) == 0u) {
         /*
-         * Shared motor bus: do not abort pending frames from the producer path.
+         * Shared motor bus: do not abort pending frames from the producer path
          * A centralized recovery service owns abort/stop/start so DM/HT/chassis
-         * cannot cancel each other's traffic opportunistically.
+         * cannot cancel each other's traffic opportunistically
          */
         can_record_tx_result(hcan, STM32_HAL_CAN_TX_MAILBOX_TIMEOUT);
         return STM32_HAL_CAN_TX_MAILBOX_TIMEOUT;
@@ -427,7 +427,7 @@ BspCanStatus can_service_recovery(FDCAN_HandleTypeDef* hcan, bool* recovered) {
      * restart.  Bus-Off sets CCCR.INIT itself. Software must clear INIT once,
      * then leave the controller alone while it observes 129 Bus Idle
      * occurrences. Repeated HAL_FDCAN_Stop()/Start() re-enters INIT and can
-     * keep restarting/obscuring that protocol-level recovery.
+     * keep restarting/obscuring that protocol-level recovery
      */
     if(runtime->recovery_in_progress) {
         if(runtime->recovery_bus_off && !can_busoff_recovery_complete(&health)) {
@@ -471,8 +471,8 @@ uint32_t can_get_recovery_count(FDCAN_HandleTypeDef* hcan) {
 
 /**
  * @brief HAL FDCAN 错误状态回调入口
- * @details 只锁存故障发生瞬间的协议状态，不在中断里做恢复或打印日志。
- *          Bus-Off 的 CCCR.INIT 清除由 can_service_recovery() 在主循环统一完成。
+ * @details 只锁存故障发生瞬间的协议状态，不在中断里做恢复或打印日志
+ *          Bus-Off 的 CCCR.INIT 清除由 can_service_recovery() 在主循环统一完成
  */
 void HAL_FDCAN_ErrorStatusCallback(FDCAN_HandleTypeDef* hfdcan, uint32_t error_status_its) {
     if(hfdcan == NULL) {
@@ -733,14 +733,14 @@ static BspCanStatus can_begin_busoff_recovery(FDCAN_HandleTypeDef* hcan,
         return STM32_HAL_CAN_INVALID_PARAM;
     }
 
-    /* Drop stale motor commands before the controller is allowed back online. */
+    /* Drop stale motor commands before the controller is allowed back online */
     can_abort_pending_tx(hcan);
     can_snapshot_recovery_cause(runtime, health, now_ms, true);
 
     /*
      * M_CAN sets CCCR.INIT when entering Bus-Off. The specified recovery
      * sequence starts only after software clears INIT. Do this once and then
-     * wait for PSR.BO to clear; do not HAL_FDCAN_Stop()/Start() in a loop.
+     * wait for PSR.BO to clear; do not HAL_FDCAN_Stop()/Start() in a loop
      */
     CLEAR_BIT(hcan->Instance->CCCR, FDCAN_CCCR_INIT);
     return STM32_HAL_CAN_OK;
@@ -757,7 +757,7 @@ static BspCanStatus can_begin_tx_quiet_recovery(FDCAN_HandleTypeDef* hcan,
     /*
      * A full FIFO with repeated producer failures is quarantined without
      * resetting FDCAN. Aborting stale requests prevents AutoRetransmission
-     * from monopolising all TX slots while the physical bus is unhealthy.
+     * from monopolising all TX slots while the physical bus is unhealthy
      */
     can_abort_pending_tx(hcan);
     can_snapshot_recovery_cause(runtime, health, now_ms, false);
@@ -787,9 +787,9 @@ static bool can_busoff_recovery_complete(const BspCanHealth* health) {
 
     /*
      * Bosch M_CAN specifies that after the 129 Bus-Idle recovery sequence,
-     * PSR.BO clears, ACT leaves Synchronizing, and both error counters reset.
+     * PSR.BO clears, ACT leaves Synchronizing, and both error counters reset
      * Requiring all of those avoids reopening motor traffic on a transient or
-     * partially observed register state.
+     * partially observed register state
      */
     return health->bus_off == 0u &&
            health->activity != 0u &&
@@ -832,7 +832,7 @@ static void can_note_rx_activity(FDCAN_HandleTypeDef* hcan) {
         return;
     }
 
-    /* A valid received frame is hard evidence that the physical bus is alive. */
+    /* A valid received frame is hard evidence that the physical bus is alive */
     runtime->recovery_backoff_ms = CAN_RECOVERY_BACKOFF_INITIAL_MS;
     runtime->consecutive_tx_failures = 0u;
 }

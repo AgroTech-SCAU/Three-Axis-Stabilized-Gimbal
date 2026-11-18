@@ -13,13 +13,16 @@ SystemStatus assemble_imu(void) {
     const uint16_t accel_int_pin = stm32_bmi088_get_accel_int_pin();
     const uint16_t gyro_int_pin = stm32_bmi088_get_gyro_int_pin();
 
-    if(imu_set_instance(&bmi088_blocking_instance) != IMU_STATUS_OK) {
+    if(imu_set_instance(&bmi088_instance) != IMU_STATUS_OK) {
         return SYSTEM_STATUS_ERROR;
     }
 
     if(bmi088_make_config(&bmi088_config, stm32_bmi088_get_ops(), accel_int_pin, gyro_int_pin) != IMU_STATUS_OK) {
         return SYSTEM_STATUS_ERROR;
     }
+
+    /* BMI088 只采集原始数据，attitude 服务独占姿态估计 */
+    bmi088_config.attitude.mode = IMU_ATTITUDE_NONE;
 
     stm32_bmi088_register_callbacks();
 

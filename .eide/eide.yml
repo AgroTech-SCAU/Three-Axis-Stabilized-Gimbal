@@ -113,6 +113,12 @@ targets:
         - Drivers/STM32H7xx_HAL_Driver/Inc/Legacy
         - Drivers/CMSIS/Device/ST/STM32H7xx/Include
         - Drivers/CMSIS/Include
+        - src/app
+        - src/device
+        - src/domain
+        - src/infra
+        - src/platform
+        - src/service
       libList: []
     excludeList: []
     settings: {}
@@ -139,6 +145,7 @@ targets:
             warnings: all-warnings
           global:
             $float-abi-type: hard
+            arm-thumb-mode: thumb
             misc-control: []
             not-use-syscalls: true
             output-debug-info: enable
@@ -146,11 +153,13 @@ targets:
           linker:
             $outputTaskExcludes:
               - .bin
+            $toolName: auto
             LD_FLAGS: ""
             LIB_FLAGS: ""
             output-format: elf
             remove-unused-input-sections: true
-        scatterFilePath: STM32H723VGTX_FLASH.ld
+            use-float-printf: true
+        scatterFilePath: STM32H723VGTX_FLASH_USER.ld
         storageLayout:
           RAM: []
           ROM: []

@@ -187,7 +187,7 @@ bool dm_motor_parse_parameter_frame(uint32_t frame_id, const uint8_t data[DM_MOT
  * @brief 使指定电机的硬件模式确认失效
  * @param motor_id 业务逻辑电机 ID
  * @return 电机状态码
- * @details CAN 总线恢复或电机可能重启后调用，强制下一次 profile.activate() 重新等待模式 ACK。
+ * @details CAN 总线恢复或电机可能重启后调用，强制下一次 profile.activate() 重新等待模式 ACK
  */
 BusMotorStatus dm_motor_invalidate_mode_confirmation(BusMotorId motor_id);
 
@@ -232,7 +232,7 @@ BusMotorStatus dm_motor_set_pos_vel(BusMotorId motor_id, float position, float v
  */
 BusMotorStatus dm_motor_set_pos_force(BusMotorId motor_id, float position, uint16_t velocity, uint16_t current);
 
-/* 旧 chassis/device 接口兼容适配器；Yaw/DM 主链不使用它。 */
+/* 旧 chassis/device 接口兼容适配器；Yaw/DM 主链不使用它 */
 extern const LegacyBusMotorInterface dm_motor_instance;
 
 #endif

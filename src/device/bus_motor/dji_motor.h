@@ -32,7 +32,7 @@ typedef enum {
 /**
  * @brief DJI 电机私有初始化配置
  *
- * 长期推荐由上层显式传入 `DjiMotorConfig`；
+ * 长期推荐由上层显式传入 `DjiMotorConfig`
  * `NULL` 仅作为当前工程的兼容默认行为
  */
 typedef struct {

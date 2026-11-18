@@ -6,8 +6,8 @@
 
 // ! ========================= 变 量 声 明 ========================= ! //
 
-#define IMU_ATTITUDE_PI                       3.14159265358979323846f
-#define IMU_ATTITUDE_2PI                      (2.0f * IMU_ATTITUDE_PI)
+#define IMU_ATTITUDE_PI 3.14159265358979323846f
+#define IMU_ATTITUDE_2PI (2.0f * IMU_ATTITUDE_PI)
 
 // ! ========================= 私 有 函 数 声 明 ========================= ! //
 
@@ -23,13 +23,39 @@ static void imu_attitude_integrate_calibrating_yaw(ImuAttitude* attitude, const 
 static void imu_attitude_reset_calibration(ImuAttitude* attitude);
 static ImuAttitudeStatus imu_attitude_calibrate_gyro(ImuAttitude* attitude, const ImuSample* sample);
 static ImuGyro imu_attitude_get_temp_comp(const ImuAttitude* attitude, const ImuSample* sample);
-static float imu_attitude_get_z_bias_offset(const ImuAttitude* attitude);
-static bool imu_attitude_z_bias_model_enabled(const ImuAttitude* attitude);
+static void imu_attitude_track_stationary_bias(ImuAttitude* attitude, const ImuSample* sample, float dt);
 static ImuGyro imu_attitude_get_corrected_gyro(ImuAttitude* attitude, const ImuSample* sample);
 static void imu_attitude_update_complementary(ImuAttitude* attitude, const ImuSample* sample, float dt);
 static void imu_attitude_update_mahony(ImuAttitude* attitude, const ImuSample* sample, float dt);
 
 // ! ========================= 接 口 函 数 实 现 ========================= ! //
+
+/**
+ * @brief 获取云台六轴 Mahony 默认配置
+ * @return ImuAttitudeConfig 默认算法参数；残余零偏只由可信静止窗口更新
+ */
+ImuAttitudeConfig imu_attitude_default_config(void) {
+    return (ImuAttitudeConfig){
+        .mode = IMU_ATTITUDE_MAHONY_6AXIS,
+        .gyro_calib_samples = 2000U,
+        .acc_norm = 9.80665f,
+        .acc_norm_tolerance = 1.5f,
+        .max_acc_age_us = 20000U,
+        .gyro_calib_var_threshold = 0.0001f,
+        .complementary_tau = 0.5f,
+        .mahony_kp = 2.0f,
+        .mahony_ki = 0.0f,
+        .mahony_ki_z = 0.0f,
+        .gyro_x_temp_coeff = 0.0f,
+        .gyro_y_temp_coeff = 0.0f,
+        .gyro_z_temp_coeff = 0.000038f,
+        .gyro_z_bias_offset = 0.0f,
+        .gyro_z_bias_temp_coeff = 0.0f,
+        .zru_gyro_threshold = 0.01f,
+        .zru_min_static_us = 0U,
+        .zru_bias_gain = 0.2f,
+    };
+}
 
 ImuAttitudeStatus imu_attitude_init(ImuAttitude* attitude, const ImuAttitudeConfig* config) {
     if(attitude == 0 || config == 0 || config->mode == IMU_ATTITUDE_NONE) {
@@ -39,13 +65,25 @@ ImuAttitudeStatus imu_attitude_init(ImuAttitude* attitude, const ImuAttitudeConf
     memset(attitude, 0, sizeof(ImuAttitude));
     attitude->config = *config;
     attitude->quat.w = 1.0f;
-    attitude->zru_enabled = false;
+    attitude->zru_enabled = config->zru_bias_gain > 0.0f;
 
     if(config->gyro_calib_samples == 0U) {
         attitude->calibrated = true;
     }
 
     return IMU_ATTITUDE_STATUS_OK;
+}
+
+void imu_attitude_set_stationary(ImuAttitude* attitude, bool stationary) {
+    if(attitude == 0)
+        return;
+    attitude->stationary = stationary;
+    if(!stationary) {
+        attitude->zru_active = false;
+        attitude->zru_static_time_us = 0U;
+        if(!attitude->calibrated)
+            imu_attitude_reset_calibration(attitude);
+    }
 }
 
 ImuAttitudeStatus imu_attitude_update(ImuAttitude* attitude, const ImuSample* sample) {
@@ -55,8 +93,13 @@ ImuAttitudeStatus imu_attitude_update(ImuAttitude* attitude, const ImuSample* sa
         return IMU_ATTITUDE_STATUS_INVALID_PARAM;
     }
 
-    if((sample->flags & IMU_SAMPLE_GYRO_NEW) == 0U ||
-        (sample->flags & IMU_SAMPLE_GYRO_VALID) == 0U) {
+    attitude->zru_active = false;
+    if((sample->flags & IMU_SAMPLE_GYRO_NEW) == 0U) {
+        return IMU_ATTITUDE_STATUS_NOT_READY;
+    }
+    if((sample->flags & IMU_SAMPLE_GYRO_VALID) == 0U ||
+       !isfinite(sample->gyro.x) || !isfinite(sample->gyro.y) || !isfinite(sample->gyro.z)) {
+        imu_attitude_set_stationary(attitude, false);
         return IMU_ATTITUDE_STATUS_NOT_READY;
     }
 
@@ -64,8 +107,9 @@ ImuAttitudeStatus imu_attitude_update(ImuAttitude* attitude, const ImuSample* sa
         return imu_attitude_calibrate_gyro(attitude, sample);
     }
 
-    if(attitude->last_update_us == 0U) {
+    if(!attitude->has_update_time) {
         attitude->last_update_us = sample->gyro_timestamp_us;
+        attitude->has_update_time = true;
 
         if(!attitude->has_angle && (sample->flags & IMU_SAMPLE_ACC_VALID) != 0U) {
             imu_attitude_update_angle_by_acc(attitude, &sample->acc, true);
@@ -78,10 +122,12 @@ ImuAttitudeStatus imu_attitude_update(ImuAttitude* attitude, const ImuSample* sa
     attitude->last_update_us = sample->gyro_timestamp_us;
 
     if(dt <= 0.0f || dt > 0.1f) {
+        imu_attitude_set_stationary(attitude, false);
         return IMU_ATTITUDE_STATUS_NOT_READY;
     }
 
     attitude->zru_active = false;
+    imu_attitude_track_stationary_bias(attitude, sample, dt);
 
     if(attitude->config.mode == IMU_ATTITUDE_COMPLEMENTARY) {
         imu_attitude_update_complementary(attitude, sample, dt);
@@ -133,7 +179,7 @@ ImuAttitudeStatus imu_attitude_get_gyro_bias(const ImuAttitude* attitude, ImuGyr
         return IMU_ATTITUDE_STATUS_NOT_READY;
     }
 
-    *gyro_bias = attitude->gyro_bias;
+    *gyro_bias = attitude->gyro_bias_effective;
     return IMU_ATTITUDE_STATUS_OK;
 }
 
@@ -225,7 +271,7 @@ static bool imu_attitude_acc_can_fuse(
     }
 
     if((sample->flags & IMU_SAMPLE_ACC_VALID) == 0U ||
-        (sample->flags & IMU_SAMPLE_GYRO_VALID) == 0U) {
+       (sample->flags & IMU_SAMPLE_GYRO_VALID) == 0U) {
         return false;
     }
 
@@ -356,8 +402,9 @@ static void imu_attitude_integrate_calibrating_yaw(ImuAttitude* attitude, const 
         return;
     }
 
-    if(attitude->last_update_us == 0U) {
+    if(!attitude->has_update_time) {
         attitude->last_update_us = sample->gyro_timestamp_us;
+        attitude->has_update_time = true;
         return;
     }
 
@@ -405,7 +452,6 @@ static ImuAttitudeStatus imu_attitude_calibrate_gyro(ImuAttitude* attitude, cons
     float mean_x = 0.0f;
     float mean_y = 0.0f;
     float mean_z = 0.0f;
-    float z_bias_offset = 0.0f;
     float var_x = 0.0f;
     float var_y = 0.0f;
     float var_z = 0.0f;
@@ -414,9 +460,18 @@ static ImuAttitudeStatus imu_attitude_calibrate_gyro(ImuAttitude* attitude, cons
         return IMU_ATTITUDE_STATUS_INVALID_PARAM;
     }
 
-    if(!attitude->has_angle && (sample->flags & IMU_SAMPLE_ACC_VALID) != 0U) {
-        imu_attitude_update_angle_by_acc(attitude, &sample->acc, true);
+    /* 上层确认持续静止，本层另查样本与启动方差 */
+    if(!attitude->stationary ||
+       !imu_attitude_acc_can_fuse(attitude, sample, 0, 0) ||
+       fabsf(sample->gyro.x) > 0.05f || fabsf(sample->gyro.y) > 0.05f || fabsf(sample->gyro.z) > 0.05f ||
+       ((attitude->config.gyro_x_temp_coeff != 0.0f || attitude->config.gyro_y_temp_coeff != 0.0f ||
+         attitude->config.gyro_z_temp_coeff != 0.0f) &&
+        ((sample->flags & IMU_SAMPLE_TEMP_VALID) == 0U || !isfinite(sample->temperature)))) {
+        imu_attitude_reset_calibration(attitude);
+        return IMU_ATTITUDE_STATUS_CALIBRATING;
     }
+    if(!attitude->has_angle)
+        imu_attitude_update_angle_by_acc(attitude, &sample->acc, true);
     imu_attitude_integrate_calibrating_yaw(attitude, sample);
 
     calib_target = attitude->config.gyro_calib_samples;
@@ -431,8 +486,8 @@ static ImuAttitudeStatus imu_attitude_calibrate_gyro(ImuAttitude* attitude, cons
     }
 
     if((sample->flags & IMU_SAMPLE_ACC_VALID) != 0U &&
-        attitude->config.acc_norm > 0.0f &&
-        attitude->config.acc_norm_tolerance >= 0.0f) {
+       attitude->config.acc_norm > 0.0f &&
+       attitude->config.acc_norm_tolerance >= 0.0f) {
         acc_norm = imu_attitude_acc_norm(&sample->acc);
         if(fabsf(acc_norm - attitude->config.acc_norm) > attitude->config.acc_norm_tolerance) {
             imu_attitude_reset_calibration(attitude);
@@ -443,8 +498,8 @@ static ImuAttitudeStatus imu_attitude_calibrate_gyro(ImuAttitude* attitude, cons
     }
 
     if((sample->flags & IMU_SAMPLE_ACC_VALID) != 0U &&
-        attitude->config.max_acc_age_us != 0U &&
-        (sample->gyro_timestamp_us - sample->acc_timestamp_us) > attitude->config.max_acc_age_us) {
+       attitude->config.max_acc_age_us != 0U &&
+       (sample->gyro_timestamp_us - sample->acc_timestamp_us) > attitude->config.max_acc_age_us) {
         imu_attitude_reset_calibration(attitude);
         return IMU_ATTITUDE_STATUS_CALIBRATING;
     }
@@ -452,7 +507,7 @@ static ImuAttitudeStatus imu_attitude_calibrate_gyro(ImuAttitude* attitude, cons
     attitude->gyro_bias_sum.x += sample->gyro.x;
     attitude->gyro_bias_sum.y += sample->gyro.y;
     attitude->gyro_bias_sum.z += sample->gyro.z;
-    if((sample->flags & IMU_SAMPLE_TEMP_VALID) != 0U) {
+    if((sample->flags & IMU_SAMPLE_TEMP_VALID) != 0U && isfinite(sample->temperature)) {
         attitude->gyro_temp_sum += sample->temperature;
         attitude->gyro_temp_count++;
     }
@@ -469,9 +524,9 @@ static ImuAttitudeStatus imu_attitude_calibrate_gyro(ImuAttitude* attitude, cons
     var_z = attitude->gyro_sq_sum.z / (float)attitude->calib_count - mean_z * mean_z;
 
     if(attitude->config.gyro_calib_var_threshold > 0.0f &&
-        (var_x > attitude->config.gyro_calib_var_threshold ||
-            var_y > attitude->config.gyro_calib_var_threshold ||
-            var_z > attitude->config.gyro_calib_var_threshold)) {
+       (var_x > attitude->config.gyro_calib_var_threshold ||
+        var_y > attitude->config.gyro_calib_var_threshold ||
+        var_z > attitude->config.gyro_calib_var_threshold)) {
         imu_attitude_reset_calibration(attitude);
         return IMU_ATTITUDE_STATUS_CALIBRATING;
     }
@@ -490,12 +545,16 @@ static ImuAttitudeStatus imu_attitude_calibrate_gyro(ImuAttitude* attitude, cons
         attitude->gyro_temp_valid = true;
     }
 
-    z_bias_offset = imu_attitude_get_z_bias_offset(attitude);
-    attitude->gyro_z_temp_intercept = z_bias_offset;
-    attitude->gyro_z_bias_effective = z_bias_offset;
+    attitude->gyro_bias_residual = (ImuGyro){ 0.0f, 0.0f, 0.0f };
+    attitude->gyro_temp_comp = (ImuGyro){ 0.0f, 0.0f, 0.0f };
+    attitude->gyro_bias_effective = attitude->gyro_bias;
+    attitude->gyro_z_temp_intercept = mean_z - attitude->config.gyro_z_temp_coeff * attitude->gyro_temp_ref;
+    attitude->gyro_z_bias_effective = mean_z;
+    attitude->gyro_filtered = (ImuGyro){ sample->gyro.x - mean_x, sample->gyro.y - mean_y, sample->gyro.z - mean_z };
 
     attitude->calibrated = true;
     attitude->last_update_us = sample->gyro_timestamp_us;
+    attitude->has_update_time = true;
 
     if((sample->flags & IMU_SAMPLE_ACC_VALID) != 0U) {
         imu_attitude_update_angle_by_acc(attitude, &sample->acc, !attitude->has_angle);
@@ -509,55 +568,56 @@ static ImuAttitudeStatus imu_attitude_calibrate_gyro(ImuAttitude* attitude, cons
 }
 
 static ImuGyro imu_attitude_get_temp_comp(const ImuAttitude* attitude, const ImuSample* sample) {
-    ImuGyro temp_comp = { 0.0f, 0.0f, 0.0f };
-
-    if(attitude == 0 || sample == 0 || (sample->flags & IMU_SAMPLE_TEMP_VALID) == 0U) {
-        return temp_comp;
-    }
-
-    temp_comp.x = attitude->config.gyro_x_temp_coeff * sample->temperature;
-    temp_comp.y = attitude->config.gyro_y_temp_coeff * sample->temperature;
-    temp_comp.z = attitude->config.gyro_z_temp_coeff * sample->temperature;
-    return temp_comp;
-}
-
-static float imu_attitude_get_z_bias_offset(const ImuAttitude* attitude) {
-    if(attitude == 0) {
-        return 0.0f;
-    }
-
-    return attitude->config.gyro_z_bias_offset;
-}
-
-static bool imu_attitude_z_bias_model_enabled(const ImuAttitude* attitude) {
-    if(attitude == 0) {
-        return false;
-    }
-
-    return attitude->config.gyro_z_temp_coeff != 0.0f ||
-        attitude->config.gyro_z_bias_offset != 0.0f;
+    if(attitude == 0 || sample == 0)
+        return (ImuGyro){ 0.0f, 0.0f, 0.0f };
+    /* 温度暂时无效时保留上次补偿 */
+    if(!attitude->gyro_temp_valid || (sample->flags & IMU_SAMPLE_TEMP_VALID) == 0U ||
+       !isfinite(sample->temperature))
+        return attitude->gyro_temp_comp;
+    const float delta_t = sample->temperature - attitude->gyro_temp_ref;
+    return (ImuGyro){ attitude->config.gyro_x_temp_coeff * delta_t,
+                      attitude->config.gyro_y_temp_coeff * delta_t,
+                      attitude->config.gyro_z_temp_coeff * delta_t };
 }
 
 static ImuGyro imu_attitude_get_corrected_gyro(ImuAttitude* attitude, const ImuSample* sample) {
-    ImuGyro gyro = { 0.0f, 0.0f, 0.0f };
-    ImuGyro temp_comp = { 0.0f, 0.0f, 0.0f };
-    float bias_z = 0.0f;
+    if(attitude == 0 || sample == 0)
+        return (ImuGyro){ 0.0f, 0.0f, 0.0f };
+    attitude->gyro_temp_comp = imu_attitude_get_temp_comp(attitude, sample);
+    attitude->gyro_bias_effective = (ImuGyro){
+        attitude->gyro_bias.x + attitude->gyro_temp_comp.x + attitude->gyro_bias_residual.x,
+        attitude->gyro_bias.y + attitude->gyro_temp_comp.y + attitude->gyro_bias_residual.y,
+        attitude->gyro_bias.z + attitude->gyro_temp_comp.z + attitude->gyro_bias_residual.z
+    };
+    attitude->gyro_z_bias_effective = attitude->gyro_bias_effective.z;
+    attitude->gyro_z_temp_intercept = attitude->gyro_bias.z + attitude->gyro_bias_residual.z -
+                                      attitude->config.gyro_z_temp_coeff * attitude->gyro_temp_ref;
+    return (ImuGyro){ sample->gyro.x - attitude->gyro_bias_effective.x,
+                      sample->gyro.y - attitude->gyro_bias_effective.y,
+                      sample->gyro.z - attitude->gyro_bias_effective.z };
+}
 
-    if(attitude == 0 || sample == 0) {
-        return gyro;
+static void imu_attitude_track_stationary_bias(ImuAttitude* attitude, const ImuSample* sample, float dt) {
+    const ImuGyro corrected = imu_attitude_get_corrected_gyro(attitude, sample);
+    const float threshold = attitude->config.zru_gyro_threshold;
+    if(!attitude->stationary || !attitude->zru_enabled || threshold <= 0.0f ||
+       attitude->config.zru_bias_gain <= 0.0f ||
+       !imu_attitude_acc_can_fuse(attitude, sample, 0, 0) ||
+       fabsf(corrected.x) > threshold || fabsf(corrected.y) > threshold || fabsf(corrected.z) > threshold) {
+        attitude->zru_static_time_us = 0U;
+        return;
     }
-
-    temp_comp = imu_attitude_get_temp_comp(attitude, sample);
-    bias_z = attitude->gyro_bias.z;
-    if(imu_attitude_z_bias_model_enabled(attitude)) {
-        bias_z = attitude->gyro_z_temp_intercept + temp_comp.z;
+    const uint32_t step_us = (uint32_t)(dt * 1.0e6f);
+    if(attitude->zru_static_time_us < attitude->config.zru_min_static_us) {
+        attitude->zru_static_time_us += step_us;
+        if(attitude->zru_static_time_us < attitude->config.zru_min_static_us)
+            return;
     }
-
-    gyro.x = sample->gyro.x - attitude->gyro_bias.x - temp_comp.x;
-    gyro.y = sample->gyro.y - attitude->gyro_bias.y - temp_comp.y;
-    gyro.z = sample->gyro.z - bias_z;
-    attitude->gyro_z_bias_effective = bias_z;
-    return gyro;
+    const float alpha = 1.0f - expf(-attitude->config.zru_bias_gain * dt);
+    attitude->gyro_bias_residual.x += alpha * corrected.x;
+    attitude->gyro_bias_residual.y += alpha * corrected.y;
+    attitude->gyro_bias_residual.z += alpha * corrected.z;
+    attitude->zru_active = true;
 }
 
 static void imu_attitude_update_complementary(ImuAttitude* attitude, const ImuSample* sample, float dt) {
@@ -647,30 +707,24 @@ static void imu_attitude_update_mahony(ImuAttitude* attitude, const ImuSample* s
         vx = 2.0f * (attitude->quat.x * attitude->quat.z - attitude->quat.w * attitude->quat.y);
         vy = 2.0f * (attitude->quat.w * attitude->quat.x + attitude->quat.y * attitude->quat.z);
         vz = attitude->quat.w * attitude->quat.w - attitude->quat.x * attitude->quat.x -
-            attitude->quat.y * attitude->quat.y + attitude->quat.z * attitude->quat.z;
+             attitude->quat.y * attitude->quat.y + attitude->quat.z * attitude->quat.z;
 
         ex = ay * vz - az * vy;
         ey = az * vx - ax * vz;
         ez = ax * vy - ay * vx;
 
-        attitude->gyro_bias.x += attitude->config.mahony_ki * ex * dt;
-        attitude->gyro_bias.y += attitude->config.mahony_ki * ey * dt;
-        if(imu_attitude_z_bias_model_enabled(attitude)) {
-            attitude->gyro_z_temp_intercept += attitude->config.mahony_ki_z * ez * dt;
-            attitude->gyro_z_bias_effective = attitude->gyro_z_temp_intercept;
-        }
-        else {
-            attitude->gyro_bias.z += attitude->config.mahony_ki_z * ez * dt;
-            attitude->gyro_z_bias_effective = attitude->gyro_bias.z;
-        }
+        /* gyro 扣除零偏，因此零偏积分反馈取负号 */
+        attitude->gyro_bias_residual.x -= attitude->config.mahony_ki * ex * dt;
+        attitude->gyro_bias_residual.y -= attitude->config.mahony_ki * ey * dt;
+        attitude->gyro_bias_residual.z -= attitude->config.mahony_ki_z * ez * dt;
 
         gx += attitude->config.mahony_kp * ex;
         gy += attitude->config.mahony_kp * ey;
+        gz += attitude->config.mahony_kp * ez;
     }
 
-    attitude->gyro_filtered.x = gx;
-    attitude->gyro_filtered.y = gy;
-    attitude->gyro_filtered.z = gz;
+    /* 对外保留纯去偏角速度，不混入 Mahony 比例反馈 */
+    attitude->gyro_filtered = gyro;
 
     qw = attitude->quat.w;
     qx = attitude->quat.x;

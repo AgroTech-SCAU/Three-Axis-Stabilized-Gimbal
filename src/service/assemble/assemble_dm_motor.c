@@ -12,10 +12,10 @@
 #include <string.h>
 
 /*
- * DMG6220 Yaw 电机。
+ * DMG6220 Yaw 电机
  *
- * 驱动层、V4 协议、registry/profile 和模式 ACK 处理直接来自成功示例 dm_ok。
- * 本文件只把成功示例的 motor_test 生命周期适配成“自动进入 POS_VEL + IMU Yaw”。
+ * 驱动层、V4 协议、registry/profile 和模式 ACK 处理直接来自成功示例 dm_ok
+ * 本文件只把成功示例的 motor_test 生命周期适配成“自动进入 POS_VEL + IMU Yaw”
  */
 #define DM_GIMBAL_LOGICAL_ID             1u
 #define DM_GIMBAL_CAN_ID                 0x01u
@@ -27,12 +27,12 @@
 #define DM_MODE_MAX_RETRY                 3u
 #define DM_MODE_RETRY_FOREVER_DELAY_MS    2000u
 #define DM_CAN_DIAG_LOG_PERIOD_MS          1000u
-#define DM_TARGET_TX_PERIOD_MS            10u
+#define DM_TARGET_TX_PERIOD_MS            3u
 #define DM_FEEDBACK_STALE_TIMEOUT_MS      500u
 #define DM_FEEDBACK_LOG_PERIOD_MS         1000u
 #define DM_STALE_LOG_PERIOD_MS            1000u
 #define DM_DEFAULT_TARGET_SPEED_RAD_S     1.0f
-
+volatile float g_yaw_velocity = 0.0f;
 typedef enum {
     DM_RUNTIME_UNINITIALIZED = 0u,
     DM_RUNTIME_WAIT_AUTO_MODE,
@@ -64,7 +64,7 @@ static const DmMotorConfig s_dm_config = {
     .default_mode = DM_MOTOR_MODE_POS_VEL,
 };
 
-/* 与成功示例一样，由 assemble 提供实例存储。 */
+/* 与成功示例一样，由 assemble 提供实例存储 */
 static DmMotorInstance s_dm_instances[1];
 
 static const BusMotorPortOps s_dm_motor_ops = {
@@ -83,7 +83,12 @@ static bool s_feedback_seen = false;
 static bool s_enabled = false;
 static bool s_fault_latched = false;
 static bool s_hold_target_ready = false;
+static bool s_external_target_active;
+static uint32_t s_external_target_ms, s_external_target_timeout_ms;
+static volatile uint32_t s_feedback_rx_ms;
 static float s_target_position = 0.0f;
+static float s_last_sent_target;
+static bool s_last_sent_target_valid;
 static float s_target_speed = DM_DEFAULT_TARGET_SPEED_RAD_S;
 static uint32_t s_last_feedback_seen_ms = 0u;
 static uint32_t s_last_target_tx_ms = 0u;
@@ -96,7 +101,7 @@ static uint32_t s_auto_mode_wait_ms = DM_AUTO_MODE_DELAY_MS;
 static uint8_t s_mode_attempt = 0u;
 static DmRuntimeState s_runtime_state = DM_RUNTIME_UNINITIALIZED;
 
-/* 只用于失败诊断；ISR 只复制，不打印。 */
+/* 只用于失败诊断；ISR 只复制，不打印 */
 static volatile uint32_t s_raw_rx_count = 0u;
 static volatile uint32_t s_last_raw_rx_id = 0u;
 static volatile uint8_t s_last_raw_rx_data[8];
@@ -106,7 +111,7 @@ SystemStatus assemble_dm_motor(void) {
     BspCanStatus can_status;
     uint32_t now_ms;
 
-    /* 以下三步与成功示例 assemble_motor() 完全相同。 */
+    /* 以下三步与成功示例 assemble_motor() 完全相同 */
     status = bus_motor.init();
     if(status != MOTOR_STATUS_OK) {
         log_error("DM bus_motor init failed: %s", bus_motor.status_str(status));
@@ -135,6 +140,9 @@ SystemStatus assemble_dm_motor(void) {
     s_enabled = false;
     s_fault_latched = false;
     s_hold_target_ready = false;
+    s_external_target_active = false;
+    s_last_sent_target_valid = false;
+    s_feedback_rx_ms = 0u;
     s_target_position = 0.0f;
     s_target_speed = DM_DEFAULT_TARGET_SPEED_RAD_S;
     s_last_feedback_seen_ms = now_ms;
@@ -151,7 +159,7 @@ SystemStatus assemble_dm_motor(void) {
     s_last_raw_rx_id = 0u;
     memset((void*)s_last_raw_rx_data, 0, sizeof(s_last_raw_rx_data));
 
-    /* 成功示例：CAN1 收发器先上电并稳定 10 ms，再启动 FDCAN。 */
+    /* 成功示例：CAN1 收发器先上电并稳定 10 ms，再启动 FDCAN */
     HAL_GPIO_WritePin(CAN1_EN_GPIO_Port, CAN1_EN_Pin, GPIO_PIN_SET);
     delay_ms(DM_CAN_ENABLE_DELAY_MS);
 
@@ -175,7 +183,7 @@ SystemStatus assemble_dm_motor(void) {
      * before the motor rail/transceivers are ready; with CAN auto-retransmit a
      * single unacknowledged frame can drive TEC to Bus-Off before entry_loop()
      * starts. clear-error/disable/mode/enable are therefore performed by the
-     * runtime handshake after the system-wide 500 ms settle delay.
+     * runtime handshake after the system-wide 500 ms settle delay
      */
     log_info("DM init transport ready; motor commands deferred to runtime");
 
@@ -225,7 +233,7 @@ void assemble_dm_motor_process(void) {
         __enable_irq();
     }
 
-    /* 与成功示例 motor_test_process() 相同：故障只在主循环执行安全失能。 */
+    /* 与成功示例 motor_test_process() 相同：故障只在主循环执行安全失能 */
     if(fault_pending) {
         BusMotorStatus disable_status;
 
@@ -288,6 +296,11 @@ void assemble_dm_motor_process(void) {
         }
     }
 
+    if(s_external_target_active &&
+       ((uint32_t)(now - s_external_target_ms) > s_external_target_timeout_ms ||
+        !dm_feedback_is_fresh(now))) {
+        assemble_dm_motor_clear_control_target();
+    }
     if(can_tx_ready(&hfdcan1) &&
        s_runtime_state == DM_RUNTIME_READY && s_enabled && !s_fault_latched &&
        s_hold_target_ready &&
@@ -349,7 +362,7 @@ bool assemble_dm_motor_set_target_position(float position, float speed) {
      * Only update the desired target here. assemble_dm_motor_process() is the
      * single 100 Hz CAN producer for runtime POS_VEL commands. This prevents
      * the gimbal controller and the resend path from generating two DM frames
-     * in the same 10 ms window.
+     * in the same 10 ms window
      */
     s_target_position = position;
     s_target_speed = speed;
@@ -361,17 +374,23 @@ static bool dm_feedback_is_fresh(uint32_t now_ms) {
            (uint32_t)(now_ms - s_last_feedback_seen_ms) <= DM_FEEDBACK_STALE_TIMEOUT_MS;
 }
 
+bool assemble_dm_motor_get_last_sent_target(float *position) {
+    if(!position || !s_last_sent_target_valid || !assemble_dm_motor_is_ready()) return false;
+    *position=s_last_sent_target;
+    return true;
+}
 static bool dm_send_current_target(void) {
-    return dm_motor_set_pos_vel((BusMotorId)DM_GIMBAL_LOGICAL_ID,
-                                s_target_position,
-                                s_target_speed) == MOTOR_STATUS_OK;
+    bool ok=dm_motor_set_pos_vel((BusMotorId)DM_GIMBAL_LOGICAL_ID,
+                                s_target_position,s_target_speed)==MOTOR_STATUS_OK;
+    if(ok) { s_last_sent_target=s_target_position; s_last_sent_target_valid=true; }
+    return ok;
 }
 
 static bool dm_enter_pos_vel_reference(void) {
     BusMotorStatus status;
     BusMotorStatus cleanup_status;
 
-    /* Runtime sequence: clear fault -> disable -> select POS_VEL -> enable. */
+    /* Runtime sequence: clear fault -> disable -> select POS_VEL -> enable */
     status = dm_motor_clear_error((BusMotorId)DM_GIMBAL_LOGICAL_ID);
     if(status == MOTOR_STATUS_OK) {
         status = bus_motor.basic.disable((BusMotorId)DM_GIMBAL_LOGICAL_ID);
@@ -406,7 +425,7 @@ static void dm_try_enter_ready(uint32_t now_ms, const BusMotorFeedback* feedback
         return;
     }
 
-    /* 第一帧使能后反馈作为安全保持点，再交给 IMU Yaw 改目标。 */
+    /* 第一帧使能后反馈作为安全保持点，再交给 IMU Yaw 改目标 */
     s_target_position = feedback->position;
     s_target_speed = DM_DEFAULT_TARGET_SPEED_RAD_S;
     status = dm_motor_set_pos_vel((BusMotorId)DM_GIMBAL_LOGICAL_ID,
@@ -422,6 +441,8 @@ static void dm_try_enter_ready(uint32_t now_ms, const BusMotorFeedback* feedback
         return;
     }
 
+    s_last_sent_target=s_target_position;
+    s_last_sent_target_valid=true;
     s_hold_target_ready = true;
     s_last_target_tx_ms = now_ms;
     s_runtime_state = DM_RUNTIME_READY;
@@ -429,6 +450,8 @@ static void dm_try_enter_ready(uint32_t now_ms, const BusMotorFeedback* feedback
 }
 
 static void dm_restart_runtime_handshake(uint32_t now_ms, uint32_t delay_ms) {
+    s_external_target_active = false;
+    s_last_sent_target_valid = false;
     uint32_t primask = __get_PRIMASK();
 
     __disable_irq();
@@ -473,7 +496,7 @@ static void dm_log_can_diagnostic(const char* action) {
 }
 
 static bool dm_motor_can_send(uint32_t id, const uint8_t* data, uint8_t len) {
-    /* dm_ok 的 can_send() 始终发送 Classical CAN + BRS OFF。 */
+    /* dm_ok 的 can_send() 始终发送 Classical CAN + BRS OFF */
     return can_send_classic(&hfdcan1, id, data, len) == STM32_HAL_CAN_OK;
 }
 
@@ -497,14 +520,16 @@ static void dm_motor_can_rx_callback(FDCAN_HandleTypeDef* hcan,
         s_last_raw_rx_data[i] = data[i];
     }
 
-    /* 成功示例 assemble_motor_can_rx() 原始顺序：参数 ACK 必须先解析。 */
+    /* 成功示例 assemble_motor_can_rx() 原始顺序：参数 ACK 必须先解析 */
     if(dm_motor_parse_parameter_frame(header->Identifier, data)) {
         return;
     }
 
     if(dm_motor_parse_feedback_frame(header->Identifier, data, &feedback) == MOTOR_STATUS_OK &&
        feedback.id == (BusMotorId)DM_GIMBAL_LOGICAL_ID) {
+        s_feedback_rx_ms = HAL_GetTick();
         s_feedback = feedback;
+        g_yaw_velocity = feedback.velocity;  /* rad/s */
         s_feedback_updated = true;
 
         if(feedback.error_code >= 0x08u && feedback.error_code <= 0x0Eu) {
@@ -539,4 +564,48 @@ static void dm_log_rx_diagnostic(void) {
               data[4], data[5], data[6], data[7],
               (unsigned long)s_dm_instances[0].mode_ack_sequence,
               (unsigned long)s_dm_instances[0].mode_ack_value);
+}
+
+/* Read-only coherent snapshot; return false for absent/stale feedback */
+bool assemble_dm_motor_get_feedback_snapshot(BusMotorFeedback* feedback) {
+    if(feedback == NULL) return false;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    bool fresh = dm_feedback_is_fresh(HAL_GetTick());
+    if(fresh) {
+        *feedback = s_feedback;
+    }
+    __set_PRIMASK(primask);
+    return fresh;
+}
+
+/* Interface plumbing only; control tuning lives in gimbal_control.c */
+bool assemble_dm_motor_get_feedback_snapshot_age(BusMotorFeedback* feedback, uint32_t* age_ms) {
+    if(feedback == NULL || age_ms == NULL) return false;
+    uint32_t key = __get_PRIMASK();
+    __disable_irq();
+    bool valid = s_feedback_seen;
+    *age_ms = HAL_GetTick() - s_feedback_rx_ms;
+    if(valid) *feedback = s_feedback;
+    __set_PRIMASK(key);
+    return valid;
+}
+bool assemble_dm_motor_set_target_position_guarded(float position, float speed, uint32_t timeout_ms) {
+    if(timeout_ms == 0u || !assemble_dm_motor_set_target_position(position, speed)) return false;
+    s_external_target_ms = HAL_GetTick();
+    s_external_target_timeout_ms = timeout_ms;
+    s_external_target_active = true;
+    return true;
+}
+void assemble_dm_motor_clear_control_target(void) {
+    if(!s_external_target_active) return;
+    uint32_t key = __get_PRIMASK();
+    __disable_irq();
+    /* Stop advancing the corrective target; hold the last received position
+     * CAN loss can prevent delivery: this is not a hardware emergency stop
+     */
+    if(s_feedback_seen && (s_feedback.valid & BUS_MOTOR_FEEDBACK_POSITION) && isfinite(s_feedback.position))
+        s_target_position = s_feedback.position;
+    s_external_target_active = false;
+    __set_PRIMASK(key);
 }

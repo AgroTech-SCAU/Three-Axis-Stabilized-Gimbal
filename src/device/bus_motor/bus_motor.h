@@ -446,9 +446,9 @@ typedef struct {
 /*
  * ========================= 旧设备接口兼容层 =========================
  *
- * 当前工程中的 HT/DJI 驱动早于 dm_ok 的 registry/profile bus_motor。
+ * 当前工程中的 HT/DJI 驱动早于 dm_ok 的 registry/profile bus_motor
  * DM 使用上面的 dm_ok 原生接口；HT/DJI 保留这组兼容类型，二者共享
- * BusMotorStatus / BusMotorFeedback / BusMotorPortOps，不互相覆盖。
+ * BusMotorStatus / BusMotorFeedback / BusMotorPortOps，不互相覆盖
  */
 typedef uint32_t BusMotorMode;
 

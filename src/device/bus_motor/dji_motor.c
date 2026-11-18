@@ -155,7 +155,7 @@ static BusMotorStatus dji_motor_init(const BusMotorConfig* config) {
     }
     else {
         /* Compatibility default for the current project until upper layers
-         * pass DjiMotorConfig explicitly. */
+         * pass DjiMotorConfig explicitly */
         model = DJI_MOTOR_MODEL_M2006;
     }
 

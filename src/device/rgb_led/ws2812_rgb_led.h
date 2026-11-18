@@ -23,7 +23,7 @@
 /**
  * @brief WS2812 RGB LED 默认复位时间对应的填充字节数
  *
- * 以 800 kHz 速率发送时，复位低电平通常需要大于 50 us
+ * 默认填充 80 个 SPI 字节，低电平时长由 SPI 时钟决定
  */
 #define WS2812_RGB_LED_DEFAULT_RESET_BYTES 80u
 
@@ -45,7 +45,7 @@ extern const RgbLedInterface ws2812_rgb_led_instance;
  * @return RGB LED 状态码
  */
 RgbLedStatus ws2812_rgb_led_make_config(RgbLedConfig* out_config, const RgbLedPortOps* ops,
-    uint8_t* color_buffer, uint32_t color_buffer_size,
-    uint8_t* tx_buffer, uint32_t tx_buffer_size);
+                                        uint8_t* color_buffer, uint32_t color_buffer_size,
+                                        uint8_t* tx_buffer, uint32_t tx_buffer_size);
 
 #endif
