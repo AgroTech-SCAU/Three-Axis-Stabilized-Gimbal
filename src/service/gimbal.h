@@ -2,7 +2,7 @@
 #define _gimbal_h_
 
 /** @file gimbal.h
- * @brief 云台服务：启动、自动运行与安全停止
+ * @brief 云台启动、增稳与手动瞄准
  */
 
 #include "attitude.h"
@@ -33,6 +33,7 @@ typedef enum {
     GIMBAL_FAULT_HOLD_COMMAND,
     GIMBAL_FAULT_CONTROL,
     GIMBAL_FAULT_RUN_COMMAND,
+    GIMBAL_FAULT_RELEASE,
 } GimbalFault;
 
 /** @brief 事件快照中的单轴原因；年龄始终另行保存，不把未就绪混同为超龄 */
@@ -71,12 +72,14 @@ typedef struct {
     GimbalInputDiagnostic stopped;
 } GimbalStopDiagnostic;
 
-/** @brief 只包装当前工程已有接口，不修改 DM/HT 的协议或生命周期 */
+/** @brief 绑定电机控制、失能与串口接口 */
 typedef struct {
     void (*process_motor_bus)(void);
     bool (*read_motor)(GimbalAxis axis, GimbalMotorFeedback* feedback);
     bool (*set_motor_target)(GimbalAxis axis, float position, float speed, uint32_t timeout_ms);
     void (*clear_motor_target)(GimbalAxis axis);
+    void (*set_motor_released)(GimbalAxis axis, bool released);
+    bool (*is_motor_released)(GimbalAxis axis);
     bool (*read_console_byte)(uint8_t* byte);
     bool (*take_console_rx_reset)(void);
     bool (*write_console)(const char* data, uint32_t length);
@@ -113,6 +116,9 @@ typedef struct {
     uint8_t hold_pending_mask;
     bool initialized;
     bool running;
+    bool manual;          /**< 手动瞄准，禁止自动上力 */
+    bool motors_released; /**< 禁能提交及后续反馈有效 */
+    bool rearming;        /**< 从手动模式重新接管 */
     bool ready;
     bool fault;
     bool fault_latched; /**< 安全停止锁存；PA15 确认后等待自动运行 */
@@ -127,6 +133,7 @@ extern const struct GimbalInterface {
     GimbalStatus (*init)(const GimbalConfig* config);
     void (*process)(void);
     bool (*acknowledge_fault)(void); /**< 仅安全锁存时清锁，准备与运行时返回 false */
+    bool (*toggle_target_mode)(void); /**< 增稳与手动瞄准切换 */
     const GimbalState* (*get_state)(void);
     bool (*is_ready)(void);
     const char* (*status_str)(GimbalStatus status);
@@ -138,6 +145,7 @@ extern const struct GimbalInterface {
 GimbalStatus gimbal_init(const GimbalConfig* config);
 void gimbal_process(void);
 bool gimbal_acknowledge_fault(void);
+bool gimbal_toggle_target_mode(void);
 const GimbalState* gimbal_get_state(void);
 bool gimbal_is_ready(void);
 const char* gimbal_status_str(GimbalStatus status);

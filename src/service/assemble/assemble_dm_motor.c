@@ -28,6 +28,14 @@
 #define DM_MODE_RETRY_FOREVER_DELAY_MS    2000u
 #define DM_CAN_DIAG_LOG_PERIOD_MS          1000u
 #define DM_TARGET_TX_PERIOD_MS            3u
+#define DM_RELEASE_RETRY_MS               100u
+#define DM_RELEASE_QUERY_MS               20u
+#define DM_RELEASE_FEEDBACK_MAX_AGE_MS     200u
+#define DM_RESUME_FEEDBACK_MAX_AGE_MS      20u
+#define DM_RESUME_FEEDBACK_TIMEOUT_MS      200u
+#define DM_RESUME_TIMEOUT_MS               400u
+#define DM_RESUME_RETRY_MS                 10u
+#define DM_RESUME_MODE_BUDGET_MS           110u
 #define DM_FEEDBACK_STALE_TIMEOUT_MS      500u
 #define DM_FEEDBACK_LOG_PERIOD_MS         1000u
 #define DM_STALE_LOG_PERIOD_MS            1000u
@@ -36,8 +44,10 @@ volatile float g_yaw_velocity = 0.0f;
 typedef enum {
     DM_RUNTIME_UNINITIALIZED = 0u,
     DM_RUNTIME_WAIT_AUTO_MODE,
+    DM_RUNTIME_WAIT_RESUME_FEEDBACK,
     DM_RUNTIME_WAIT_FEEDBACK,
     DM_RUNTIME_READY,
+    DM_RUNTIME_RELEASED,
     DM_RUNTIME_FAILED,
 } DmRuntimeState;
 
@@ -49,6 +59,10 @@ static void dm_motor_can_rx_callback(FDCAN_HandleTypeDef* hcan,
 static bool dm_feedback_is_fresh(uint32_t now_ms);
 static bool dm_send_current_target(void);
 static bool dm_enter_pos_vel_reference(void);
+static void dm_process_released(uint32_t now_ms);
+static bool dm_request_feedback(void);
+static void dm_process_resume(uint32_t now_ms);
+static void dm_abort_resume(const char* reason);
 static void dm_try_enter_ready(uint32_t now_ms, const BusMotorFeedback* feedback);
 static void dm_log_rx_diagnostic(void);
 static void dm_log_can_diagnostic(const char* action);
@@ -86,6 +100,17 @@ static bool s_hold_target_ready = false;
 static bool s_external_target_active;
 static uint32_t s_external_target_ms, s_external_target_timeout_ms;
 static volatile uint32_t s_feedback_rx_ms;
+static volatile uint32_t s_feedback_sequence;
+static uint32_t s_enable_feedback_sequence;
+static bool s_release_requested, s_release_command_sent, s_rearm_pending;
+static bool s_resume_limits_valid;
+static float s_resume_min_position, s_resume_max_position;
+static uint32_t s_release_feedback_sequence;
+static uint32_t s_last_release_tx_ms, s_last_release_query_ms;
+static uint32_t s_resume_started_ms, s_resume_stage_ms, s_resume_last_tx_ms;
+static uint32_t s_resume_feedback_sequence;
+static bool s_resume_query_sent;
+static const char* s_resume_wait_reason;
 static float s_target_position = 0.0f;
 static float s_last_sent_target;
 static bool s_last_sent_target_valid;
@@ -143,6 +168,15 @@ SystemStatus assemble_dm_motor(void) {
     s_external_target_active = false;
     s_last_sent_target_valid = false;
     s_feedback_rx_ms = 0u;
+    s_feedback_sequence = s_enable_feedback_sequence = 0u;
+    s_release_requested = s_release_command_sent = s_rearm_pending = false;
+    s_resume_limits_valid = false;
+    s_release_feedback_sequence = 0u;
+    s_last_release_tx_ms = s_last_release_query_ms = now_ms;
+    s_resume_started_ms = s_resume_stage_ms = s_resume_last_tx_ms = now_ms;
+    s_resume_feedback_sequence = 0u;
+    s_resume_query_sent = false;
+    s_resume_wait_reason = "mode";
     s_target_position = 0.0f;
     s_target_speed = DM_DEFAULT_TARGET_SPEED_RAD_S;
     s_last_feedback_seen_ms = now_ms;
@@ -205,12 +239,22 @@ void assemble_dm_motor_process(void) {
     bool updated = false;
     bool fault_pending = false;
     uint8_t fault_code = 0u;
+    uint32_t feedback_sequence = 0u;
     uint32_t primask;
     uint32_t recovery_count = can_get_recovery_count(&hfdcan1);
 
     if(recovery_count != s_seen_can_recovery_count) {
         s_seen_can_recovery_count = recovery_count;
-        if(!s_fault_latched) {
+        if(s_release_requested || s_rearm_pending) {
+            if(s_rearm_pending) log_warn("DM resume stop reason=CAN recovery");
+            s_release_requested = false;
+            assemble_dm_motor_set_released(true);
+            s_feedback_seen = false;
+            s_feedback_updated = false;
+            (void)dm_motor_invalidate_mode_confirmation((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+            (void)bus_motor_driver_reset_profile((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+        }
+        else if(!s_fault_latched) {
             log_warn("DM CAN recovery observed count=%lu; restart POS_VEL handshake",
                      (unsigned long)recovery_count);
             dm_restart_runtime_handshake(now, DM_AUTO_MODE_DELAY_MS);
@@ -221,6 +265,7 @@ void assemble_dm_motor_process(void) {
     __disable_irq();
     if(s_feedback_updated) {
         feedback = s_feedback;
+        feedback_sequence = s_feedback_sequence;
         s_feedback_updated = false;
         updated = true;
     }
@@ -231,6 +276,11 @@ void assemble_dm_motor_process(void) {
     }
     if(primask == 0u) {
         __enable_irq();
+    }
+
+    if(updated) {
+        s_feedback_seen = true;
+        s_last_feedback_seen_ms = s_feedback_rx_ms;
     }
 
     /* 与成功示例 motor_test_process() 相同：故障只在主循环执行安全失能 */
@@ -244,6 +294,19 @@ void assemble_dm_motor_process(void) {
         disable_status = bus_motor.basic.disable((BusMotorId)DM_GIMBAL_LOGICAL_ID);
         log_error("DM fault latched: code=0x%02X disable=%s",
                   fault_code, bus_motor.status_str(disable_status));
+        if(s_rearm_pending) {
+            dm_abort_resume("motor fault");
+            return;
+        }
+        if(!s_release_requested) return;
+    }
+
+    if(s_release_requested) {
+        dm_process_released(now);
+        return;
+    }
+    if(s_rearm_pending) {
+        dm_process_resume(now);
         return;
     }
 
@@ -277,12 +340,16 @@ void assemble_dm_motor_process(void) {
         }
     }
 
+    now = HAL_GetTick();
     if(updated) {
         s_feedback_seen = true;
-        s_last_feedback_seen_ms = now;
+        s_last_feedback_seen_ms = s_feedback_rx_ms;
 
-        if(s_runtime_state == DM_RUNTIME_WAIT_FEEDBACK && s_enabled && !s_fault_latched) {
+        if(s_runtime_state == DM_RUNTIME_WAIT_FEEDBACK && s_enabled && !s_fault_latched &&
+           feedback.error_code == 0x01u &&
+           (int32_t)(feedback_sequence - s_enable_feedback_sequence) > 0) {
             dm_try_enter_ready(now, &feedback);
+            if(s_release_requested) return;
         }
 
         if((uint32_t)(now - s_last_feedback_log_ms) >= DM_FEEDBACK_LOG_PERIOD_MS) {
@@ -324,12 +391,226 @@ void assemble_dm_motor_process(void) {
     }
 }
 
+void assemble_dm_motor_set_position_limits(float min_position, float max_position) {
+    s_resume_limits_valid = isfinite(min_position) && isfinite(max_position) &&
+        min_position <= max_position;
+    if(s_resume_limits_valid) {
+        s_resume_min_position = min_position;
+        s_resume_max_position = max_position;
+    }
+}
+
+void assemble_dm_motor_set_released(bool released) {
+    uint32_t now = HAL_GetTick();
+
+    if(released == s_release_requested) return;
+    if(!released && s_fault_latched) return;
+
+    s_release_requested = released;
+    s_enabled = false;
+    s_hold_target_ready = false;
+    s_external_target_active = false;
+    s_last_sent_target_valid = false;
+    s_target_position = 0.0f;
+    s_target_speed = DM_DEFAULT_TARGET_SPEED_RAD_S;
+    s_mode_attempt = 0u;
+    s_rearm_pending = !released;
+    if(released) {
+        s_release_command_sent = false;
+        s_release_feedback_sequence = s_feedback_sequence;
+        s_last_release_tx_ms = now - DM_RELEASE_RETRY_MS;
+        s_last_release_query_ms = now - DM_RELEASE_QUERY_MS;
+        s_runtime_state = DM_RUNTIME_RELEASED;
+        dm_process_released(now);
+    }
+    else {
+        s_runtime_state = DM_RUNTIME_WAIT_AUTO_MODE;
+        s_resume_started_ms = s_resume_stage_ms = now;
+        s_resume_last_tx_ms = now - DM_RESUME_RETRY_MS;
+        s_resume_query_sent = false;
+        s_resume_wait_reason = "mode";
+        log_info("DM resume mode");
+        s_auto_mode_start_ms = now;
+        s_auto_mode_wait_ms = 0u;
+        (void)dm_motor_invalidate_mode_confirmation((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+        (void)bus_motor_driver_reset_profile((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+    }
+}
+
+bool assemble_dm_motor_is_released(void) {
+    uint32_t key = __get_PRIMASK();
+    __disable_irq();
+    bool released = s_release_requested && s_release_command_sent && s_feedback_seen &&
+        (int32_t)(s_feedback_sequence - s_release_feedback_sequence) > 0 &&
+        (uint32_t)(HAL_GetTick() - s_feedback_rx_ms) <= DM_RELEASE_FEEDBACK_MAX_AGE_MS &&
+        s_feedback.error_code == 0x00u &&
+        (s_feedback.valid & BUS_MOTOR_FEEDBACK_POSITION) && isfinite(s_feedback.position);
+    __set_PRIMASK(key);
+    return released && can_tx_ready(&hfdcan1) &&
+        s_seen_can_recovery_count == can_get_recovery_count(&hfdcan1);
+}
+
+static void dm_process_released(uint32_t now_ms) {
+    if(!can_tx_ready(&hfdcan1)) return;
+    if((uint32_t)(now_ms - s_last_release_tx_ms) >= DM_RELEASE_RETRY_MS) {
+        uint32_t sequence = s_feedback_sequence;
+        s_last_release_tx_ms = now_ms;
+        if(bus_motor.basic.disable((BusMotorId)DM_GIMBAL_LOGICAL_ID) == MOTOR_STATUS_OK &&
+           !s_release_command_sent) {
+            s_release_feedback_sequence = sequence;
+            s_release_command_sent = true;
+        }
+    }
+    if((uint32_t)(now_ms - s_last_release_query_ms) >= DM_RELEASE_QUERY_MS) {
+        s_last_release_query_ms = now_ms;
+        (void)dm_request_feedback();
+    }
+}
+
+static bool dm_request_feedback(void) {
+    /* 官方 motor-sdk 的 0xCC 状态读取，失能时也更新角度 */
+    const uint8_t request[8] = { DM_GIMBAL_CAN_ID & 0xFFu,
+        (DM_GIMBAL_CAN_ID >> 8) & 0xFFu, 0xCCu, 0u, 0u, 0u, 0u, 0u };
+    return dm_motor_can_send(0x7FFu, request, sizeof(request));
+}
+
+static void dm_abort_resume(const char* reason) {
+    const char* phase = s_runtime_state == DM_RUNTIME_WAIT_AUTO_MODE ? "mode" :
+        s_runtime_state == DM_RUNTIME_WAIT_RESUME_FEEDBACK ? "position" : "enabled";
+    log_warn("DM resume stop phase=%s reason=%s", phase, reason);
+    assemble_dm_motor_set_released(true);
+}
+
+static void dm_process_resume(uint32_t now_ms) {
+    BusMotorStatus status;
+    BusMotorFeedback current;
+    uint32_t sequence, age, key;
+    bool valid;
+
+    if((uint32_t)(now_ms - s_resume_started_ms) >= DM_RESUME_TIMEOUT_MS) {
+        dm_abort_resume(s_resume_wait_reason);
+        return;
+    }
+    if(!can_tx_ready(&hfdcan1)) {
+        s_resume_wait_reason = "CAN busy";
+        return;
+    }
+    if(s_runtime_state == DM_RUNTIME_WAIT_AUTO_MODE) {
+        /* 给现有阻塞模式 ACK 留出预算，不延长总恢复时间 */
+        if((uint32_t)(now_ms - s_resume_last_tx_ms) < DM_RESUME_RETRY_MS ||
+           (uint32_t)(now_ms - s_resume_started_ms) >
+               DM_RESUME_TIMEOUT_MS - DM_RESUME_MODE_BUDGET_MS) return;
+        status = dm_motor_clear_error((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+        if(status == MOTOR_STATUS_OK)
+            status = bus_motor.basic.disable((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+        if(status == MOTOR_STATUS_OK)
+            status = bus_motor.profile.activate((BusMotorId)DM_GIMBAL_LOGICAL_ID,
+                                                BUS_MOTOR_PROFILE_POSITION);
+        now_ms = HAL_GetTick();
+        s_resume_last_tx_ms = now_ms;
+        if(s_fault_pending || s_fault_latched) {
+            dm_abort_resume("motor fault");
+            return;
+        }
+        if(status != MOTOR_STATUS_OK) {
+            s_resume_wait_reason = bus_motor.status_str(status);
+            return;
+        }
+        if((uint32_t)(now_ms - s_resume_started_ms) >= DM_RESUME_TIMEOUT_MS) {
+            dm_abort_resume("mode timeout");
+            return;
+        }
+        /* ACK 前的角度不可接管，先查询并等待新序号 */
+        s_resume_feedback_sequence = s_feedback_sequence;
+        s_resume_stage_ms = now_ms;
+        s_runtime_state = DM_RUNTIME_WAIT_RESUME_FEEDBACK;
+        s_resume_wait_reason = "position feedback";
+        s_last_release_query_ms = now_ms;
+        s_resume_query_sent = dm_request_feedback();
+        log_info("DM resume wait position");
+        return;
+    }
+
+    if((uint32_t)(now_ms - s_resume_stage_ms) >= DM_RESUME_FEEDBACK_TIMEOUT_MS) {
+        dm_abort_resume(s_resume_wait_reason);
+        return;
+    }
+    if((uint32_t)(now_ms - s_last_release_query_ms) >= DM_RELEASE_QUERY_MS) {
+        s_last_release_query_ms = now_ms;
+        if(dm_request_feedback()) s_resume_query_sent = true;
+    }
+    key = __get_PRIMASK();
+    __disable_irq();
+    current = s_feedback;
+    sequence = s_feedback_sequence;
+    age = HAL_GetTick() - s_feedback_rx_ms;
+    valid = s_feedback_seen;
+    __set_PRIMASK(key);
+    if(s_fault_pending || s_fault_latched) {
+        dm_abort_resume("motor fault");
+        return;
+    }
+    if(!valid || !s_resume_query_sent || age > DM_RESUME_FEEDBACK_MAX_AGE_MS) return;
+    if((int32_t)(sequence - (s_runtime_state == DM_RUNTIME_WAIT_RESUME_FEEDBACK ?
+        s_resume_feedback_sequence : s_enable_feedback_sequence)) <= 0) return;
+    if(!(current.valid & BUS_MOTOR_FEEDBACK_POSITION) || !isfinite(current.position) ||
+       !s_resume_limits_valid || current.position < s_resume_min_position ||
+       current.position > s_resume_max_position) {
+        dm_abort_resume("position limit");
+        return;
+    }
+    now_ms = HAL_GetTick();
+    if((uint32_t)(now_ms - s_resume_last_tx_ms) < DM_RESUME_RETRY_MS) return;
+    s_resume_last_tx_ms = now_ms;
+    if(s_runtime_state == DM_RUNTIME_WAIT_RESUME_FEEDBACK && current.error_code != 0x00u) {
+        (void)bus_motor.basic.disable((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+        s_resume_wait_reason = "disabled feedback";
+        return;
+    }
+    if(s_runtime_state == DM_RUNTIME_WAIT_FEEDBACK && current.error_code != 0x01u) return;
+
+    /* 每次重试都取当前新反馈，绝不复用上次预置位置 */
+    status = dm_motor_set_pos_vel((BusMotorId)DM_GIMBAL_LOGICAL_ID,
+                                  current.position, DM_DEFAULT_TARGET_SPEED_RAD_S);
+    if(status != MOTOR_STATUS_OK) {
+        s_resume_wait_reason = s_runtime_state == DM_RUNTIME_WAIT_RESUME_FEEDBACK ?
+            "preload busy" : "hold busy";
+        return;
+    }
+    if(s_runtime_state == DM_RUNTIME_WAIT_RESUME_FEEDBACK) {
+        if(s_fault_pending || !can_tx_ready(&hfdcan1)) return;
+        s_enable_feedback_sequence = s_feedback_sequence;
+        status = bus_motor.basic.enable((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+        if(status != MOTOR_STATUS_OK) {
+            s_resume_wait_reason = "enable busy";
+            return;
+        }
+        s_enabled = true;
+        s_runtime_state = DM_RUNTIME_WAIT_FEEDBACK;
+        s_resume_stage_ms = HAL_GetTick();
+        s_resume_last_tx_ms = s_resume_stage_ms - DM_RESUME_RETRY_MS;
+        s_last_release_query_ms = s_resume_stage_ms - DM_RELEASE_QUERY_MS;
+        s_resume_wait_reason = "enabled feedback";
+        log_info("DM resume wait enabled");
+        return;
+    }
+    s_target_position = current.position;
+    s_target_speed = DM_DEFAULT_TARGET_SPEED_RAD_S;
+    s_last_sent_target = current.position;
+    s_last_sent_target_valid = true;
+    s_hold_target_ready = true;
+    s_rearm_pending = false;
+    s_last_target_tx_ms = HAL_GetTick();
+    s_runtime_state = DM_RUNTIME_READY;
+    log_info("DM resume ready pos=%.3f rad", (double)current.position);
+}
+
 bool assemble_dm_motor_has_feedback(void) {
     return dm_feedback_is_fresh(HAL_GetTick());
 }
 
 bool assemble_dm_motor_is_ready(void) {
-    return can_tx_ready(&hfdcan1) &&
+    return !s_release_requested && can_tx_ready(&hfdcan1) &&
            s_runtime_state == DM_RUNTIME_READY &&
            s_enabled &&
            !s_fault_latched &&
@@ -371,7 +652,7 @@ bool assemble_dm_motor_set_target_position(float position, float speed) {
 
 static bool dm_feedback_is_fresh(uint32_t now_ms) {
     return s_feedback_seen &&
-           (uint32_t)(now_ms - s_last_feedback_seen_ms) <= DM_FEEDBACK_STALE_TIMEOUT_MS;
+           (uint32_t)(now_ms - s_feedback_rx_ms) <= DM_FEEDBACK_STALE_TIMEOUT_MS;
 }
 
 bool assemble_dm_motor_get_last_sent_target(float *position) {
@@ -400,6 +681,7 @@ static bool dm_enter_pos_vel_reference(void) {
                                             BUS_MOTOR_PROFILE_POSITION);
     }
     if(status == MOTOR_STATUS_OK) {
+        s_enable_feedback_sequence = s_feedback_sequence;
         status = bus_motor.basic.enable((BusMotorId)DM_GIMBAL_LOGICAL_ID);
     }
 
@@ -421,7 +703,7 @@ static void dm_try_enter_ready(uint32_t now_ms, const BusMotorFeedback* feedback
 
     if(feedback == NULL || !can_tx_ready(&hfdcan1) ||
        s_runtime_state != DM_RUNTIME_WAIT_FEEDBACK ||
-       !s_enabled || s_fault_latched) {
+       !s_enabled || s_fault_latched || s_release_requested) {
         return;
     }
 
@@ -444,6 +726,7 @@ static void dm_try_enter_ready(uint32_t now_ms, const BusMotorFeedback* feedback
     s_last_sent_target=s_target_position;
     s_last_sent_target_valid=true;
     s_hold_target_ready = true;
+    s_rearm_pending = false;
     s_last_target_tx_ms = now_ms;
     s_runtime_state = DM_RUNTIME_READY;
     log_info("DM ready: hold current pos=%.3f rad", (double)feedback->position);
@@ -468,6 +751,7 @@ static void dm_restart_runtime_handshake(uint32_t now_ms, uint32_t delay_ms) {
     s_auto_mode_start_ms = now_ms;
     s_auto_mode_wait_ms = delay_ms;
     (void)dm_motor_invalidate_mode_confirmation((BusMotorId)DM_GIMBAL_LOGICAL_ID);
+    (void)bus_motor_driver_reset_profile((BusMotorId)DM_GIMBAL_LOGICAL_ID);
 }
 
 static void dm_log_can_diagnostic(const char* action) {
@@ -529,6 +813,7 @@ static void dm_motor_can_rx_callback(FDCAN_HandleTypeDef* hcan,
        feedback.id == (BusMotorId)DM_GIMBAL_LOGICAL_ID) {
         s_feedback_rx_ms = HAL_GetTick();
         s_feedback = feedback;
+        ++s_feedback_sequence;
         g_yaw_velocity = feedback.velocity;  /* rad/s */
         s_feedback_updated = true;
 
@@ -598,6 +883,11 @@ bool assemble_dm_motor_set_target_position_guarded(float position, float speed, 
     return true;
 }
 void assemble_dm_motor_clear_control_target(void) {
+    if(s_release_requested) {
+        s_external_target_active = false;
+        s_last_sent_target_valid = false;
+        return;
+    }
     if(!s_external_target_active) return;
     uint32_t key = __get_PRIMASK();
     __disable_irq();

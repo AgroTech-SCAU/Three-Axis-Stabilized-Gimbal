@@ -16,7 +16,8 @@
 #define USER_IO_BUTTON_DEBOUNCE_MS 25u
 #define USER_IO_LED_RETRY_MS 20u
 #define USER_IO_LED_REFRESH_MS 1000u
-#define USER_IO_LED_HALF_PERIOD_MS 125u
+#define USER_IO_WAIT_HALF_PERIOD_MS 500u
+#define USER_IO_FAULT_HALF_PERIOD_MS 125u
 #define USER_IO_MAX_BRIGHTNESS 32u
 
 static UserIoPortOps s_ops;
@@ -163,7 +164,7 @@ static UserIoStatus user_io_set_indicator(UserIoIndicator indicator) {
     if(!s_initialized) {
         return USER_IO_STATUS_NOT_INITIALIZED;
     }
-    if(indicator < USER_IO_INDICATOR_WAIT || indicator > USER_IO_INDICATOR_FAULT) {
+    if(indicator < USER_IO_INDICATOR_WAIT || indicator > USER_IO_INDICATOR_MANUAL) {
         return USER_IO_STATUS_INVALID_PARAM;
     }
     if(indicator != s_state.indicator) {
@@ -241,10 +242,17 @@ static RgbLedColor user_io_indicator_color(void) {
     }
     switch(s_state.indicator) {
         case USER_IO_INDICATOR_WAIT:
+            color.r = s_brightness;
+            color.g = s_brightness;
+            break;
         case USER_IO_INDICATOR_FAULT:
             color.r = s_brightness;
             break;
         case USER_IO_INDICATOR_RUN:
+            color.b = s_brightness;
+            break;
+        case USER_IO_INDICATOR_MANUAL:
+            color.g = s_brightness;
             break;
         default:
             break;
@@ -267,8 +275,11 @@ static UserIoStatus user_io_process_indicator(uint32_t now_ms) {
         s_led_phase_on = true;
         s_led_phase_ms = now_ms;
     }
-    if(s_state.indicator == USER_IO_INDICATOR_WAIT || s_state.indicator == USER_IO_INDICATOR_FAULT) {
-        half_period_ms = USER_IO_LED_HALF_PERIOD_MS;
+    if(s_state.indicator == USER_IO_INDICATOR_WAIT) {
+        half_period_ms = USER_IO_WAIT_HALF_PERIOD_MS;
+    }
+    else if(s_state.indicator == USER_IO_INDICATOR_FAULT) {
+        half_period_ms = USER_IO_FAULT_HALF_PERIOD_MS;
     }
     if(half_period_ms != 0u) {
         uint32_t steps = (uint32_t)(now_ms - s_led_phase_ms) / half_period_ms;

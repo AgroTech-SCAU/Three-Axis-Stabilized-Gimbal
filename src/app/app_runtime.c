@@ -32,8 +32,13 @@ void app_runtime_process(void) {
     (void)user_io.set_indicator(app_runtime_indicator(state));
     /* LED 失败不阻断按键，初始化失败也继续推进闪烁 */
     (void)user_io.process(state->now_ms);
-    if(user_io.take_button_press() && initialized && state->fault_latched) {
-        (void)gimbal.acknowledge_fault();
+    if(user_io.take_button_press() && initialized) {
+        if(state->fault_latched) {
+            (void)gimbal.acknowledge_fault();
+        }
+        else {
+            (void)gimbal.toggle_target_mode();
+        }
     }
     (void)user_io.set_indicator(app_runtime_indicator(state));
 }
@@ -43,6 +48,9 @@ void app_runtime_process(void) {
 static UserIoIndicator app_runtime_indicator(const GimbalState* state) {
     if(!initialized || state->fault) {
         return USER_IO_INDICATOR_FAULT;
+    }
+    if(state->manual && state->motors_released) {
+        return USER_IO_INDICATOR_MANUAL;
     }
     if(state->running && !state->run_waiting) {
         return USER_IO_INDICATOR_RUN;
