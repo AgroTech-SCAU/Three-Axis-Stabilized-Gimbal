@@ -52,7 +52,7 @@ SystemStatus assemble_gimbal(void) {
     if(assemble_delay() != SYSTEM_STATUS_OK || assemble_log() != SYSTEM_STATUS_OK) {
         return SYSTEM_STATUS_ERROR;
     }
-    log_info("BOOT gimbal-retarget-simple-20261119");
+    log_info("BOOT gimbal-mit-rearm-20261119");
     for(unsigned i = 0u; i < GIMBAL_AXIS_COUNT; ++i) {
         s_gimbal_motor_released[i] = false;
     }

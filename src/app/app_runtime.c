@@ -46,7 +46,13 @@ void app_runtime_process(void) {
 // ! ========================= 私 有 函 数 实 现 ========================= ! //
 
 static UserIoIndicator app_runtime_indicator(const GimbalState* state) {
-    if(!initialized || state->fault) {
+    if(!initialized || state->fault_latched) {
+        return USER_IO_INDICATOR_FAULT;
+    }
+    if(state->rearming) {
+        return USER_IO_INDICATOR_WAIT;
+    }
+    if(state->fault) {
         return USER_IO_INDICATOR_FAULT;
     }
     if(state->manual && state->motors_released) {

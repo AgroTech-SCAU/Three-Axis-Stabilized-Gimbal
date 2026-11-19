@@ -204,19 +204,21 @@ void gimbal_process(void) {
     if(gimbal_state.manual) {
         gimbal_process_manual();
     }
-    else if(!gimbal_state.running && !gimbal_state.fault_latched) {
-        if(!gimbal_state.rearming || (rearm_motors_requested && gimbal_state.blocker == GIMBAL_CONTROL_OK)) {
-            gimbal_process_hold();
-        }
+    else if(!gimbal_state.running && !gimbal_state.fault_latched && !gimbal_state.rearming) {
+        gimbal_process_hold();
         gimbal_update_prepare_fault();
     }
     if(!was_calibrated && gimbal_state.attitude_snapshot.calibrated) {
         log_info("IMU calibrated");
     }
-    gimbal_state.ready = !gimbal_state.manual && (!gimbal_state.rearming || rearm_motors_requested) &&
-                         gimbal_state.blocker == GIMBAL_CONTROL_OK && !gimbal_state.fault &&
-                         !gimbal_state.run_waiting && gimbal_state.hold_pending_mask == 0u &&
-                         (gimbal_state.running || (hold_captured && hold_submitted));
+    bool rearm_ready = gimbal_state.rearming && rearm_motors_requested &&
+                       gimbal_state.blocker == GIMBAL_CONTROL_OK && !imu_fault_active &&
+                       gimbal_feedback_ready();
+    bool prepare_ready = !gimbal_state.rearming && hold_captured && hold_submitted &&
+                         gimbal_state.hold_pending_mask == 0u;
+    gimbal_state.ready = !gimbal_state.manual && gimbal_state.blocker == GIMBAL_CONTROL_OK &&
+                         !gimbal_state.fault && !gimbal_state.run_waiting &&
+                         (gimbal_state.running || rearm_ready || prepare_ready);
     if(gimbal_state.ready && !gimbal_state.running) {
         gimbal_enter_run();
     }
