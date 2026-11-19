@@ -23,6 +23,8 @@ SystemStatus assemble_rgb(void);
 SystemStatus assemble_imu(void);
 SystemStatus assemble_ht_motor(void);
 void assemble_ht_motor_process(void);
+void assemble_ht_motor_set_released(uint16_t id, bool released);
+bool assemble_ht_motor_is_released(uint16_t id);
 bool assemble_ht_motor_has_feedback(uint16_t id);
 bool assemble_ht_motor_get_raw_position(uint16_t id, float* position);
 bool assemble_ht_motor_set_target_position(uint16_t id, float position);
@@ -33,6 +35,9 @@ bool assemble_ht_motor_set_control_target(uint16_t id, float position, float spe
 void assemble_ht_motor_cancel_control(uint16_t id);
 SystemStatus assemble_dm_motor(void);
 void assemble_dm_motor_process(void);
+void assemble_dm_motor_set_position_limits(float min_position, float max_position);
+void assemble_dm_motor_set_released(bool released);
+bool assemble_dm_motor_is_released(void);
 bool assemble_dm_motor_get_last_sent_target(float* position);
 bool assemble_dm_motor_get_feedback_snapshot(BusMotorFeedback* feedback);
 bool assemble_dm_motor_get_feedback_snapshot_age(BusMotorFeedback* feedback, uint32_t* age_ms);

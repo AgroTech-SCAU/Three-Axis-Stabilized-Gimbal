@@ -11,6 +11,8 @@
 // ! ========================= 变 量 声 明 ========================= ! //
 
 #define GIMBAL_IMU_FAULT_MS 200u
+#define GIMBAL_RELEASE_TIMEOUT_MS 500u
+#define GIMBAL_REARM_RETRY_MS 250u
 #define GIMBAL_RAW_DURATION_MS 10000u
 #define GIMBAL_RAD_TO_DEG 57.295779513f
 #define GIMBAL_LOG_FRAME_CAPACITY 1280u
@@ -25,6 +27,7 @@ static bool telemetry_enabled = true;
 static bool raw_enabled;
 static bool imu_bad;
 static bool imu_fault_active;
+static bool rearm_motors_requested;
 static uint8_t run_pending_mask;
 static GimbalControlStatus run_wait_status;
 static GimbalFault run_wait_reason;
@@ -36,6 +39,8 @@ static uint32_t hold_reject_ms[GIMBAL_AXIS_COUNT];
 static uint32_t imu_bad_since_ms;
 static uint32_t last_run_good_ms;
 static uint32_t raw_started_ms;
+static uint32_t mode_started_ms;
+static uint32_t rearm_retry_ms[GIMBAL_AXIS_COUNT];
 static uint32_t last_hold_ms;
 static uint32_t last_log_ms;
 static uint32_t last_status_ms;
@@ -76,6 +81,12 @@ static void gimbal_process_control(uint32_t now_us);
 static void gimbal_process_console(void);
 static void gimbal_handle_console_line(void);
 static void gimbal_enter_run(void);
+static void gimbal_enter_manual(void);
+static void gimbal_process_manual(void);
+static void gimbal_process_rearm(uint32_t now_us);
+static bool gimbal_all_motors_released(void);
+static GimbalControlStatus gimbal_check_rearm(uint32_t now_us);
+static bool gimbal_rearm_rejected(uint32_t now_us);
 static void gimbal_write_telemetry(uint32_t now_us);
 static void gimbal_write_status(void);
 static void gimbal_write_raw(uint32_t now_us);
@@ -95,6 +106,7 @@ const struct GimbalInterface gimbal_interface = {
         .init = gimbal_init,
     .process = gimbal_process,
     .acknowledge_fault = gimbal_acknowledge_fault,
+    .toggle_target_mode = gimbal_toggle_target_mode,
     .get_state = gimbal_get_state,
     .is_ready = gimbal_is_ready,
     .status_str = gimbal_status_str,
@@ -105,7 +117,8 @@ const struct GimbalInterface gimbal_interface = {
 GimbalStatus gimbal_init(const GimbalConfig* config) {
     if(config == NULL || config->ops == NULL || config->ops->process_motor_bus == NULL ||
        config->ops->read_motor == NULL || config->ops->set_motor_target == NULL ||
-       config->ops->clear_motor_target == NULL || config->ops->read_console_byte == NULL ||
+       config->ops->clear_motor_target == NULL || config->ops->set_motor_released == NULL ||
+       config->ops->is_motor_released == NULL || config->ops->read_console_byte == NULL ||
        config->ops->take_console_rx_reset == NULL || config->ops->write_console == NULL ||
        !isfinite(config->hold_speed) || config->hold_speed <= 0.0f ||
        config->hold_period_ms == 0u || config->hold_timeout_ms <= config->hold_period_ms ||
@@ -125,9 +138,10 @@ GimbalStatus gimbal_init(const GimbalConfig* config) {
     memset(&measurement, 0, sizeof(measurement));
     memset(hold_position, 0, sizeof(hold_position));
     memset(hold_reject_ms, 0, sizeof(hold_reject_ms));
+    memset(rearm_retry_ms, 0, sizeof(rearm_retry_ms));
     hold_captured = hold_submitted = false;
     telemetry_enabled = true;
-    raw_enabled = imu_bad = imu_fault_active = false;
+    raw_enabled = imu_bad = imu_fault_active = rearm_motors_requested = false;
     run_pending_mask = 0u;
     run_wait_status = GIMBAL_CONTROL_OK;
     run_wait_reason = GIMBAL_FAULT_NONE;
@@ -141,7 +155,7 @@ GimbalStatus gimbal_init(const GimbalConfig* config) {
     log_frame_sequence = 0u;
     last_log_ms = last_status_ms = delay_now_ms();
     last_hold_ms = last_status_ms - gimbal_config.hold_period_ms;
-    last_run_good_ms = raw_started_ms = imu_bad_since_ms = last_status_ms;
+    last_run_good_ms = raw_started_ms = imu_bad_since_ms = mode_started_ms = last_status_ms;
     gimbal_state.initialized = true;
     gimbal_state.fault_axis = GIMBAL_AXIS_COUNT;
     gimbal_state.blocker = GIMBAL_CONTROL_IMU_INVALID;
@@ -158,10 +172,10 @@ void gimbal_process(void) {
         return;
     }
 
-    /* 启动标定只看 IMU 静止统计；残余学习还需电机静止，RUN 冻结 */
+    /* 手动拖动与重新接管期间冻结零偏学习 */
     gimbal_read_feedback();
     bool was_calibrated = gimbal_state.attitude_snapshot.calibrated;
-    bool learning = !gimbal_state.running &&
+    bool learning = !gimbal_state.running && !gimbal_state.manual && !gimbal_state.rearming &&
                     (!was_calibrated || (!gimbal_state.fault && gimbal_feedback_stationary()));
     attitude.set_bias_learning(learning);
     AttitudeStatus imu_status = attitude.process(begin_us);
@@ -184,16 +198,27 @@ void gimbal_process(void) {
     if(gimbal_state.running) {
         gimbal_process_control(now_us);
     }
-    if(!gimbal_state.running && !gimbal_state.fault_latched) {
+    if(gimbal_state.rearming) {
+        gimbal_process_rearm(now_us);
+    }
+    if(gimbal_state.manual) {
+        gimbal_process_manual();
+    }
+    else if(!gimbal_state.running && !gimbal_state.fault_latched && !gimbal_state.rearming) {
         gimbal_process_hold();
         gimbal_update_prepare_fault();
     }
     if(!was_calibrated && gimbal_state.attitude_snapshot.calibrated) {
         log_info("IMU calibrated");
     }
-    gimbal_state.ready = gimbal_state.blocker == GIMBAL_CONTROL_OK && !gimbal_state.fault &&
-                         !gimbal_state.run_waiting && gimbal_state.hold_pending_mask == 0u &&
-                         (gimbal_state.running || (hold_captured && hold_submitted));
+    bool rearm_ready = gimbal_state.rearming && rearm_motors_requested &&
+                       gimbal_state.blocker == GIMBAL_CONTROL_OK && !imu_fault_active &&
+                       gimbal_feedback_ready();
+    bool prepare_ready = !gimbal_state.rearming && hold_captured && hold_submitted &&
+                         gimbal_state.hold_pending_mask == 0u;
+    gimbal_state.ready = !gimbal_state.manual && gimbal_state.blocker == GIMBAL_CONTROL_OK &&
+                         !gimbal_state.fault && !gimbal_state.run_waiting &&
+                         (gimbal_state.running || rearm_ready || prepare_ready);
     if(gimbal_state.ready && !gimbal_state.running) {
         gimbal_enter_run();
     }
@@ -221,6 +246,35 @@ bool gimbal_acknowledge_fault(void) {
     return true;
 }
 
+bool gimbal_toggle_target_mode(void) {
+    if(!gimbal_state.initialized || gimbal_state.fault_latched) {
+        return false;
+    }
+    if(gimbal_state.running || gimbal_state.rearming) {
+        gimbal_enter_manual();
+        return true;
+    }
+    if(!gimbal_state.manual) {
+        return false;
+    }
+    gimbal_read_feedback();
+    uint32_t now_us = delay_now_us();
+    gimbal_state.now_ms = delay_now_ms();
+    gimbal_state.blocker = gimbal_control_check(&gimbal_config.control, &measurement, gimbal_state.motor, now_us);
+    gimbal_state.motors_released = gimbal_all_motors_released();
+    gimbal_clear_targets();
+    gimbal_set_fault(GIMBAL_FAULT_NONE, GIMBAL_AXIS_COUNT, false);
+    gimbal_state.manual = false;
+    gimbal_state.motors_released = false;
+    gimbal_state.rearming = true;
+    rearm_motors_requested = false;
+    mode_started_ms = gimbal_state.now_ms;
+    memset(rearm_retry_ms, 0, sizeof(rearm_retry_ms));
+    last_hold_ms = mode_started_ms - gimbal_config.hold_period_ms;
+    log_info("TARGET rearming; waiting inputs");
+    return true;
+}
+
 const GimbalState* gimbal_get_state(void) {
     return &gimbal_state;
 }
@@ -243,6 +297,116 @@ const char* gimbal_status_str(GimbalStatus status) {
 
 // ! ========================= 私 有 函 数 实 现 ========================= ! //
 
+static bool gimbal_all_motors_released(void) {
+    for(unsigned i = 0u; i < GIMBAL_AXIS_COUNT; ++i) {
+        if(!gimbal_config.ops->is_motor_released((GimbalAxis)i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void gimbal_enter_manual(void) {
+    /* 先锁存禁能，清目标接口才不会发送当前位置保持 */
+    for(unsigned i = 0u; i < GIMBAL_AXIS_COUNT; ++i) {
+        gimbal_config.ops->set_motor_released((GimbalAxis)i, true);
+    }
+    gimbal_control_stop(&gimbal_state.control);
+    gimbal_state.running = false;
+    gimbal_state.ready = false;
+    gimbal_state.run_waiting = false;
+    gimbal_state.manual = true;
+    gimbal_state.rearming = false;
+    rearm_motors_requested = false;
+    gimbal_state.motors_released = false;
+    gimbal_state.now_ms = delay_now_ms();
+    mode_started_ms = gimbal_state.now_ms;
+    run_pending_mask = 0u;
+    run_wait_axis_mask = 0u;
+    run_wait_logged = false;
+    attitude.set_bias_learning(false);
+    gimbal_clear_targets();
+    memset(hold_position, 0, sizeof(hold_position));
+    memset(hold_reject_ms, 0, sizeof(hold_reject_ms));
+    log_info("TARGET manual; wait for green");
+}
+
+static void gimbal_process_manual(void) {
+    gimbal_state.motors_released = gimbal_all_motors_released();
+    if(gimbal_state.fault_latched) {
+        return;
+    }
+    if(!gimbal_state.motors_released &&
+       (uint32_t)(gimbal_state.now_ms - mode_started_ms) >= GIMBAL_RELEASE_TIMEOUT_MS) {
+        gimbal_set_fault(GIMBAL_FAULT_RELEASE, GIMBAL_AXIS_COUNT, false);
+    }
+    else if(imu_fault_active) {
+        gimbal_set_fault(GIMBAL_FAULT_IMU, GIMBAL_AXIS_COUNT, false);
+    }
+    else {
+        gimbal_set_fault(GIMBAL_FAULT_NONE, GIMBAL_AXIS_COUNT, false);
+    }
+}
+
+static void gimbal_process_rearm(uint32_t now_us) {
+    /* 一次按键锁存恢复请求，不以普通总线延迟退出切换状态 */
+    if(gimbal_rearm_rejected(now_us)) {
+        /* 机械或几何条件不满足时停止接管，保持黄色等待而非退绿
+           已开始使能的轴先全部失能，按键仍可随时取消 */
+        if(rearm_motors_requested) {
+            for(unsigned i = 0u; i < GIMBAL_AXIS_COUNT; ++i) {
+                gimbal_config.ops->set_motor_released((GimbalAxis)i, true);
+            }
+            gimbal_clear_targets();
+            rearm_motors_requested = false;
+            log_warn("TARGET waiting safety=%s", gimbal_blocker_name(gimbal_check_rearm(now_us)));
+        }
+        return;
+    }
+    if(!rearm_motors_requested) {
+        /* 失能确认后等待新鲜姿态和三轴反馈，再提交一次恢复请求 */
+        gimbal_state.motors_released = gimbal_all_motors_released();
+        if(!gimbal_state.motors_released || gimbal_state.blocker != GIMBAL_CONTROL_OK || imu_fault_active) {
+            return;
+        }
+        for(unsigned i = 0u; i < GIMBAL_AXIS_COUNT; ++i) {
+            gimbal_config.ops->set_motor_released((GimbalAxis)i, false);
+            rearm_retry_ms[i] = gimbal_state.now_ms;
+        }
+        rearm_motors_requested = true;
+        gimbal_state.motors_released = false;
+        log_info("TARGET resume requested");
+        return;
+    }
+    /* 驱动握手中断后若重新回到失能态，仅重新请求该轴
+       不重置其它轴，也不清除已锁存的恢复请求 */
+    for(unsigned i = 0u; i < GIMBAL_AXIS_COUNT; ++i) {
+        if(gimbal_config.ops->is_motor_released((GimbalAxis)i) &&
+           (uint32_t)(gimbal_state.now_ms - rearm_retry_ms[i]) >= GIMBAL_REARM_RETRY_MS) {
+            gimbal_config.ops->set_motor_released((GimbalAxis)i, false);
+            rearm_retry_ms[i] = gimbal_state.now_ms;
+            log_info("TARGET retry motor=%u", (unsigned)gimbal_config.motor_id[i]);
+        }
+    }
+}
+
+static bool gimbal_rearm_rejected(uint32_t now_us) {
+    GimbalControlStatus status = gimbal_check_rearm(now_us);
+    /* 握手期间允许短暂等数据，机械限位与奇异姿态立即退出 */
+    return status != GIMBAL_CONTROL_OK && status != GIMBAL_CONTROL_IMU_INVALID &&
+           status != GIMBAL_CONTROL_MOTOR_INVALID;
+}
+
+static GimbalControlStatus gimbal_check_rearm(uint32_t now_us) {
+    GimbalMotorFeedback motor[GIMBAL_AXIS_COUNT];
+    memcpy(motor, gimbal_state.motor, sizeof(motor));
+    /* DM 握手时尚未 ready，安全检查仍使用独立的原始位置与时效 */
+    for(unsigned i = 0u; i < GIMBAL_AXIS_COUNT; ++i) {
+        motor[i].ready = isfinite(motor[i].position) && motor[i].age_ms != UINT32_MAX;
+    }
+    return gimbal_control_check(&gimbal_config.control, &measurement, motor, now_us);
+}
+
 static void gimbal_enter_run(void) {
     gimbal_read_feedback();
     uint32_t now_us = delay_now_us();
@@ -255,6 +419,7 @@ static void gimbal_enter_run(void) {
     }
     attitude.set_bias_learning(false);
     gimbal_state.running = true;
+    gimbal_state.rearming = false;
     gimbal_state.run_waiting = false;
     run_pending_mask = 0u;
     run_wait_axis_mask = 0u;
@@ -317,6 +482,8 @@ static const char* gimbal_fault_name(GimbalFault reason) {
             return "RUN_INPUT";
         case GIMBAL_FAULT_RUN_COMMAND:
             return "RUN_COMMAND";
+        case GIMBAL_FAULT_RELEASE:
+            return "MOTOR_RELEASE";
         default:
             return "UNKNOWN";
     }
@@ -785,7 +952,7 @@ static void gimbal_write_raw(uint32_t now_us) {
         const GimbalMotorFeedback* motor = &gimbal_state.motor[i];
         const GimbalAxisConfig* config = &gimbal_config.control.axis[i];
         float joint = gimbal_config.control.coordinates_confirmed ? config->direction * config->ratio * (motor->position - config->zero) : NAN;
-        float target = gimbal_state.running ? gimbal_state.control.axis[i].command : hold_position[i];
+        float target = gimbal_state.running ? gimbal_state.control.axis[i].command : (hold_captured ? hold_position[i] : NAN);
         bool accepted = gimbal_state.running ? (run_pending_mask & (1u << i)) == 0u : hold_captured && (gimbal_state.hold_pending_mask & (1u << i)) == 0u;
         gimbal_frame_append("motor,%lu,%u,%u,%u,%lu,%.6f,%.6f,%.6f,%.6f,%u\r\n",
                             (unsigned long)now_us, (unsigned)gimbal_config.motor_id[i], (unsigned)motor->ready,
@@ -799,7 +966,10 @@ static void gimbal_write_raw(uint32_t now_us) {
 static void gimbal_write_status(void) {
     const AttitudeSnapshot* snapshot = &gimbal_state.attitude_snapshot;
     const AttitudeState* imu_state = attitude.get_state();
-    const char* state = gimbal_state.fault_latched ? "SAFE_STOP" : (gimbal_state.running ? (gimbal_state.run_waiting ? "RUN_WAIT" : "RUN") : "STARTING");
+    const char* state = gimbal_state.fault_latched ? "SAFE_STOP"
+                      : gimbal_state.manual ? (gimbal_state.motors_released ? "MANUAL" : "MANUAL_WAIT")
+                      : gimbal_state.rearming ? "REARMING"
+                      : gimbal_state.running ? (gimbal_state.run_waiting ? "RUN_WAIT" : "RUN") : "STARTING";
     const char* recovery = !gimbal_state.fault ? "NONE" : (gimbal_state.fault_latched ? "PA15_CONFIRM" : "AUTO");
     gimbal_frame_begin("SUMMARY");
     gimbal_frame_append("[SYS] state=%s run_ready=%s | run_block=%s input=%s coords=%s | fault=%s stop_reason=%s recovery=%s\r\n",

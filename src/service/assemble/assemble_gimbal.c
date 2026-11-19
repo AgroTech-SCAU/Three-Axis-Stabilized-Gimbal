@@ -8,6 +8,7 @@
 #include "stm32_hal_uart.h"
 #include "user_io.h"
 
+#include <math.h>
 #include <stdio.h>
 
 // ! ========================= 变 量 声 明 ========================= ! //
@@ -17,6 +18,7 @@ static bool s_gimbal_motor_bus_ht_ready_logged;
 static ms_t s_gimbal_can1_recovery_error_log_timer;
 static ms_t s_gimbal_can1_recovery_progress_log_timer;
 static bool s_gimbal_can1_recovery_active;
+static bool s_gimbal_motor_released[GIMBAL_AXIS_COUNT];
 
 // ! ========================= 私 有 函 数 声 明 ========================= ! //
 
@@ -25,6 +27,8 @@ static void gimbal_process_motor_bus(void);
 static bool gimbal_read_motor(GimbalAxis axis, GimbalMotorFeedback* motor);
 static bool gimbal_set_motor_target(GimbalAxis axis, float position, float speed, uint32_t timeout_ms);
 static void gimbal_clear_motor_target(GimbalAxis axis);
+static void gimbal_set_motor_released(GimbalAxis axis, bool released);
+static bool gimbal_is_motor_released(GimbalAxis axis);
 static void gimbal_format_led_diagnostics(char* text, uint32_t capacity);
 
 // ! ========================= 变 量 定 义 ========================= ! //
@@ -34,6 +38,8 @@ static const GimbalPortOps gimbal_ops = {
     .read_motor = gimbal_read_motor,
     .set_motor_target = gimbal_set_motor_target,
     .clear_motor_target = gimbal_clear_motor_target,
+    .set_motor_released = gimbal_set_motor_released,
+    .is_motor_released = gimbal_is_motor_released,
     .read_console_byte = uart1_read_byte,
     .take_console_rx_reset = uart1_take_rx_reset,
     .write_console = uart1_write_it,
@@ -46,7 +52,10 @@ SystemStatus assemble_gimbal(void) {
     if(assemble_delay() != SYSTEM_STATUS_OK || assemble_log() != SYSTEM_STATUS_OK) {
         return SYSTEM_STATUS_ERROR;
     }
-    log_info("BOOT gimbal-v1.4-20261118");
+    log_info("BOOT gimbal-mit-rearm-20261119");
+    for(unsigned i = 0u; i < GIMBAL_AXIS_COUNT; ++i) {
+        s_gimbal_motor_released[i] = false;
+    }
     if(assemble_user_io() != SYSTEM_STATUS_OK || assemble_imu() != SYSTEM_STATUS_OK) {
         return SYSTEM_STATUS_ERROR;
     }
@@ -68,6 +77,14 @@ SystemStatus assemble_gimbal(void) {
     }
     delay_ms(500u);
     GimbalConfig config = gimbal_project_config(&gimbal_ops);
+    const GimbalAxisConfig* yaw = &config.control.axis[GIMBAL_AXIS_YAW];
+    float scale = yaw->direction * yaw->ratio;
+    if(!isfinite(scale) || scale == 0.0f) {
+        return SYSTEM_STATUS_ERROR;
+    }
+    float first = yaw->zero + yaw->min_angle / scale;
+    float second = yaw->zero + yaw->max_angle / scale;
+    assemble_dm_motor_set_position_limits(fminf(first, second), fmaxf(first, second));
     return gimbal.init(&config) == GIMBAL_STATUS_OK ? SYSTEM_STATUS_OK : SYSTEM_STATUS_ERROR;
 }
 
@@ -78,7 +95,7 @@ static void gimbal_format_led_diagnostics(char* text, uint32_t capacity) {
     if(text == NULL || capacity == 0u) {
         return;
     }
-    static const char* const indicator_names[] = { "WAIT", "OFF", "FAULT" };
+    static const char* const indicator_names[] = { "WAIT", "RUN", "FAULT", "MANUAL" };
     const UserIoState* state = user_io.get_state();
     const char* target = "INIT";
     if(state->initialized && (unsigned)state->indicator < sizeof(indicator_names) / sizeof(indicator_names[0])) {
@@ -157,8 +174,9 @@ static void gimbal_process_motor_bus(void) {
 
     /* 两台 HT 反馈有效后启动 DM 握手，减少上电总线竞争 */
     assemble_ht_motor_process();
-    if(gimbal_motor_bus_ht_ready()) {
-        if(!s_gimbal_motor_bus_ht_ready_logged) {
+    bool ht_ready = gimbal_motor_bus_ht_ready();
+    if(ht_ready || s_gimbal_motor_released[GIMBAL_AXIS_YAW]) {
+        if(ht_ready && !s_gimbal_motor_bus_ht_ready_logged) {
             s_gimbal_motor_bus_ht_ready_logged = true;
             log_info("MOTOR BUS verified by HT feedback; DM handshake released");
         }
@@ -179,14 +197,15 @@ static bool gimbal_read_motor(GimbalAxis axis, GimbalMotorFeedback* motor) {
     bool found;
     if(axis == GIMBAL_AXIS_YAW) {
         found = assemble_dm_motor_get_feedback_snapshot_age(&feedback, &motor->age_ms);
-        found = found && assemble_dm_motor_is_ready() && gimbal_motor_bus_ht_ready();
+        found = found && (s_gimbal_motor_released[axis] ||
+                          (assemble_dm_motor_is_ready() && gimbal_motor_bus_ht_ready()));
     }
     else {
         uint16_t id = axis == GIMBAL_AXIS_ROLL ? GIMBAL_ROLL_MOTOR_ID : GIMBAL_PITCH_MOTOR_ID;
         found = assemble_ht_motor_get_feedback_snapshot_age(id, &feedback, &motor->age_ms);
     }
     motor->ready = found && (feedback.valid & BUS_MOTOR_FEEDBACK_POSITION) != 0u;
-    motor->position = feedback.position;
+    motor->position = (feedback.valid & BUS_MOTOR_FEEDBACK_POSITION) != 0u ? feedback.position : NAN;
     motor->velocity = feedback.velocity;
     motor->velocity_valid = found && (feedback.valid & BUS_MOTOR_FEEDBACK_VELOCITY) != 0u;
     return motor->ready;
@@ -198,6 +217,25 @@ static bool gimbal_set_motor_target(GimbalAxis axis, float position, float speed
     }
     uint16_t id = axis == GIMBAL_AXIS_ROLL ? GIMBAL_ROLL_MOTOR_ID : GIMBAL_PITCH_MOTOR_ID;
     return assemble_ht_motor_set_control_target(id, position, speed, timeout_ms);
+}
+
+static void gimbal_set_motor_released(GimbalAxis axis, bool released) {
+    s_gimbal_motor_released[axis] = released;
+    if(axis == GIMBAL_AXIS_YAW) {
+        assemble_dm_motor_set_released(released);
+    }
+    else {
+        uint16_t id = axis == GIMBAL_AXIS_ROLL ? GIMBAL_ROLL_MOTOR_ID : GIMBAL_PITCH_MOTOR_ID;
+        assemble_ht_motor_set_released(id, released);
+    }
+}
+
+static bool gimbal_is_motor_released(GimbalAxis axis) {
+    if(axis == GIMBAL_AXIS_YAW) {
+        return assemble_dm_motor_is_released();
+    }
+    uint16_t id = axis == GIMBAL_AXIS_ROLL ? GIMBAL_ROLL_MOTOR_ID : GIMBAL_PITCH_MOTOR_ID;
+    return assemble_ht_motor_is_released(id);
 }
 
 static void gimbal_clear_motor_target(GimbalAxis axis) {
